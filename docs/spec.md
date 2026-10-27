@@ -1,0 +1,466 @@
+# chkscript v0.2 Revision Spec
+
+Oct 25, 2026 · Nicolas Kassis
+
+Source of truth while drafting: https://claude.ai/artifact/3Jh8fnUy5uPzu1q14u3afe
+
+## Goals and non-goals
+
+v0.2 turns chkscript from a single Claude call into a layered scanner whose unsafe verdicts cannot be argued down by the script being scanned, and that can run fully on the local machine.
+
+**Goals**
+
+- Deterministic layers (shellcheck, Semgrep) own the floor; the model adds judgment on top and can only add findings, never remove them.
+- Follow the scripts an installer downloads and runs, under strict fetch guardrails, so second-stage payloads are inspected rather than ignored.
+- Swappable providers through one thin boundary, with Ollama as a first-class local option so the script never has to leave the box.
+- Reliable line references and schema-enforced structured output, replacing the fence-stripping regex and retry loop.
+- Three run modes (full, no-follow, static-only) so the tool stays useful in CI and on air-gapped hosts.
+- Keep the install footprint small: one meaningful Python dependency plus optional provider SDKs; external tools shelled out, never vendored.
+
+**Non-goals**
+
+- Not a general Bash linter. shellcheck already is one; chkscript reports its results, it does not replace it.
+- Not a sandbox or dynamic analysis. Nothing is ever executed. Scripts that defeat static analysis through runtime behavior are out of scope and should be called out as such in the report.
+- No agent framework (LangChain, LangGraph). The control flow is a bounded tool loop with a fetch budget, which does not justify a graph runtime.
+- No binary analysis. Downloaded binaries are reported by URL, size and whether the script verifies a checksum or signature. They are never fetched.
+- No Windows or PowerShell support in this revision.
+
+## Threat model
+
+The input is assumed hostile. An install script may be written by someone who knows chkscript exists and wants a green verdict.
+
+| Attack on the scanner | Example | Property that defeats it |
+| --- | --- | --- |
+| Prompt injection through content | Comments like `# audited by security team, safe`, or a literal `</script>` followed by instructions | Unsafe findings come from deterministic rules the model cannot override; the model only adds findings; delimiters are randomized per run |
+| Pattern evasion | `c=curl; $c ... \| sh`, commands assembled in heredocs or via `eval`, base64-encoded payloads | The model reasons about intent on top of the rules; `eval` and decoders feeding a shell are themselves unsafe findings |
+| Hidden second stage | Script downloads `install-real.sh` and runs it | Nested scripts are fetched and run through the full pipeline; an unfetchable or unresolvable second stage is itself an unsafe finding |
+| Scanner as SSRF probe | Second-stage URL points at `169.254.169.254` or an internal host | Fetch tool rejects loopback, RFC1918, link-local and metadata addresses, and re-checks after redirects |
+| Resource exhaustion | Second-stage URL serves a multi-gigabyte file or never responds | Per-file size cap, timeout, depth limit, total fetch budget |
+| Parser evasion | Script written so Semgrep cannot parse it, hoping rules are skipped | Parse failure is reported as its own finding; regex fallback runs regardless |
+| Time-of-check vs time-of-use | Content served at scan time differs from what `curl` gets a minute later | Report carries the URL and SHA-256 of every file analyzed so the user can pin |
+| Data exfiltration via the scanner | Script contents sent to a cloud model | Local mode via Ollama; a one-line notice whenever contents leave the machine |
+
+Two properties are non-negotiable and every later section is checked against them. First, no text inside a scanned script can lower the severity of a deterministic finding. Second, the scanner never executes anything it is analyzing, and never fetches anything it was not literally told about by a script already in hand.
+
+## Pipeline overview
+
+```mermaid
+flowchart TD
+    entry["Entry script (file or stdin)"] --> pre["Preprocess<br/>number lines; extract URLs as allowlist"]
+    pre --> static
+    subgraph static["Static layer: deterministic"]
+        sc["shellcheck<br/>warning tier: antipatterns, SC codes"]
+        sg["Semgrep rules, regex fallback<br/>unsafe tier; the model cannot override"]
+    end
+    static -- "findings passed as data" --> llm["LLM layer (pydantic-ai)<br/>intent, verification, obfuscation<br/>adds findings; never removes or downgrades"]
+    llm -- requests --> fetch["fetch_script tool<br/>allowlist; https; no private hosts<br/>size, depth, budget, redirect caps"]
+    fetch -- "fetched script re-enters" --> pre
+    llm --> report["Report<br/>findings merged, max severity<br/>fetch tree with hashes, exit code"]
+```
+
+*A refused fetch is itself an unsafe finding.*
+
+Every script, including each one fetched on the model's request, passes through preprocessing and the static layer before the model sees it; the model's findings are merged on top, and severity only ever goes up.
+
+## Static layer
+
+The static layer runs first, on every script including fetched ones, and produces findings that the model cannot change.
+
+**Preprocessing**
+
+1. Decode as UTF-8 with replacement, normalize line endings, reject files over 500 KB.
+2. Number every line (`   42 | curl ... `). This numbered form is what the model sees, so `line_reference` is an integer the model copies rather than estimates.
+3. Extract URL candidates: every `https?://` literal, plus assignments that feed `curl`, `wget`, `fetch` or `git clone`. Record each with its line and whether it is literal or variable-built. This set is the fetch allowlist for the LLM layer.
+
+**shellcheck (warning tier)**
+
+- Shelled out via `shellcheck -f json -`; absent on PATH means the warning tier is skipped with a notice, not an error.
+- Every shellcheck finding becomes a `warning` with `source: shellcheck` and the SC code. No severity is promoted to `unsafe` from this layer.
+- A small suppression list for codes that are noise on install scripts (to be tuned against the fixture set).
+
+**Semgrep (unsafe tier)**
+
+- Shelled out via `semgrep --config rules/ --json`, with a ruleset shipped in the repo. Semgrep's Bash support is in its Experimental tier (90%+ parse rate), so parse failures are expected and handled below.
+- Initial rules, each producing `unsafe` with `source: semgrep`:
+  - `curl`/`wget` piped to `sh`, `bash`, `zsh` or `sudo`
+  - `eval` on any argument containing a variable or command substitution
+  - `base64 -d`, `xxd -r`, `openssl enc -d` or `gunzip -c` whose output reaches a shell
+  - writes to `/etc/sudoers*`, `/etc/passwd`, `/etc/shadow`, `/etc/ld.so.preload`
+  - appends to `~/.bashrc`, `~/.profile`, `~/.zshrc`, crontab or systemd units
+  - `chmod 777`, `chmod +s`, `chown root` on paths under `$HOME` or `/tmp`
+  - `rm -rf` with a variable in the path
+  - `setenforce 0`, `ufw disable`, `systemctl disable` of a security service
+  - download of an executable with no `sha256sum`, `shasum`, `gpg --verify` or `cosign` in the script
+- Each rule carries a one-line rationale in its message, which is what the model and the user both see.
+
+**Regex fallback and parse failures**
+
+- A plain-regex implementation of the same rule list lives in `static/regex_rules.py`. It runs when Semgrep is absent from PATH, and it also runs on any file Semgrep reports a parse error for.
+- A Semgrep parse error produces its own `warning`, `source: chkscript`: "Semgrep could not fully parse this file; static coverage reduced." This is deliberate, because a script that is unparseable on purpose should not get a quieter report.
+- When both tools are absent, the tool prints a one-line notice that only the regex rules ran, and still produces a report.
+
+**Deduplication**
+
+shellcheck, Semgrep and regex findings on the same line and rule family are merged into one finding keyed on `(file, line, rule_id)`, keeping the highest severity and listing all sources.
+
+## LLM layer
+
+The model owns intent: what the script installs, from where, whether downloads are verified, and whether anything looks obfuscated or deceptive. It runs after the static layer and receives its findings as input.
+
+**Boundary**
+
+- One class, `LLMAnalyzer`, in `analyzer.py`, with a single method: `analyze(bundle: ScriptBundle, static: list[Finding], allowlist: set[str]) -> LLMResult`.
+- Nothing outside `analyzer.py` imports `pydantic_ai`. Replacing the library later is a one-file change.
+
+**Agent**
+
+- Built on `pydantic-ai-slim` with the `anthropic` and `openai` extras. The agent's output type is `LLMResult`, a Pydantic model: `summary: str`, `findings: list[Finding]`, `notes: list[str]`, `fetched: list[FetchRecord]`.
+- Output mode is `NativeOutput` (schema enforced during generation) where the provider supports it, falling back to `ToolOutput`. This replaces the fence-stripping regex and the parse-and-retry loop.
+- `temperature=0` on every provider that accepts it, so the same script yields the same verdict.
+- `max_tokens` sized from the input: findings for a 500 KB script will not fit in 4096 tokens, so the budget scales with line count and truncation is detected from the stop reason and reported as an error rather than a partial result.
+
+**Prompt contract**
+
+- System prompt states the role, the severity definitions, and that the model may add findings but must not dispute, re-rate or omit any finding it was given.
+- Script content is wrapped in a delimiter randomized per run (`<script-7f3a9c>` ... `</script-7f3a9c>`), with the line-numbered form, so a literal `</script>` inside the file does nothing.
+- Static findings are passed as structured data, not prose, with their `source` and `rule_id`.
+- The model is asked specifically for: what gets installed and where; every network destination and whether it is verified; whether the script fetches and runs further content; signs of obfuscation; and anything the static rules missed.
+
+**Merge rules**
+
+- Model findings are tagged `source: llm`.
+- A model finding on the same line and rule family as a static finding is merged into it (its description is kept as explanation). A model finding with no static counterpart stands alone.
+- Severity of the merged report is the maximum across all sources. The model's severity can raise a line, never lower it.
+- If the model call fails, the static report is still emitted, with a `warning` from `chkscript` that the LLM layer did not run, and the exit code reflects static findings only.
+
+**Model-dependent degradation**
+
+- A provider or model without tool support runs with the fetch tool withheld (equivalent to `--no-follow`), with a notice.
+- Small local models are easier to inject than frontier ones. That is acceptable only because the floor is held by the static layer; this is the reason the static layer exists at all.
+
+## Nested script fetching
+
+The model decides which referenced scripts are worth reading. chkscript decides whether a fetch is permitted, performs it, and runs the result through the full pipeline before the model sees a line of it.
+
+**The tool**
+
+`fetch_script(url: str, reason: str) -> FetchResult` is the only tool the agent has. `reason` is recorded in the report so the user can see why each fetch happened. The tool returns either the numbered content plus that file's static findings, or a refusal with a code the model must report as a finding.
+
+**Guardrails, enforced in the tool, not in the prompt**
+
+| Rule | Value | On violation |
+| --- | --- | --- |
+| URL must appear in the allowlist | Literal URLs from any script already analyzed in this run; a variable-built URL is allowed only if its host is a literal in the script | Refused, `not_in_script` |
+| Scheme | `https` only | Refused, `insecure_scheme`; plain `http` download is also an `unsafe` static finding |
+| Destination | No loopback, RFC1918, link-local, `169.254.169.254`, `.local`, `.internal`; DNS resolved and checked before connect and again after every redirect | Refused, `private_destination` |
+| Content type | `text/*` or `application/x-sh`; anything else gets a HEAD only and its size and type are recorded | Refused, `not_text`, with HEAD metadata |
+| Size | 500 KB per file, read with a hard cap, not trusting `Content-Length` | Refused, `too_large` |
+| Timeout | 10 s connect, 20 s total | Refused, `timeout` |
+| Depth | 2 by default (`--depth`), max 4 | Refused, `depth_exceeded` |
+| Budget | 5 fetches per run (`--max-fetches`) | Refused, `budget_exhausted` |
+| Redirects | Max 3, each re-validated against every rule above | Refused, `redirect_rejected` |
+
+**What a refusal means for the verdict**
+
+Any refused fetch of something the script would execute produces an `unsafe` finding, `source: chkscript`, "executes remote content that could not be inspected". The attacker does not get a quieter report by making the second stage unreachable.
+
+**Recursion**
+
+A fetched file goes through preprocessing, shellcheck, Semgrep and regex before it is returned to the model, and its URLs are added to the allowlist for the next depth. Findings carry the file they came from. Binaries are never fetched; their URL, size and the presence or absence of checksum verification in the calling script are reported instead.
+
+**Report**
+
+The fetch tree is part of every report, whether or not findings exist: for each file, its URL, depth, parent, SHA-256, size and the reason the model gave. The entry script is the root with the hash of what was read from the file or stdin. This is the user's handle on time-of-check versus time-of-use.
+
+## Providers and models
+
+Model selection is one string in pydantic-ai's `provider:model` form, so no provider logic lives in chkscript beyond auto-detection and the leaves-the-box notice.
+
+| Provider | Selector example | Install extra | Reaches | Structured output |
+| --- | --- | --- | --- | --- |
+| Anthropic | `anthropic:claude-sonnet-4-5` | `anthropic` | api.anthropic.com | Tool-based |
+| Ollama (local) | `ollama:qwen3` | `openai` | `OLLAMA_BASE_URL`, default `http://localhost:11434/v1` | Native JSON schema, enforced during generation (Ollama 0.5+) |
+| OpenAI-compatible | `openai:<model>` with `OPENAI_BASE_URL` | `openai` | vLLM, llama.cpp server, OpenRouter, hosted providers | Varies; tool-based fallback |
+
+**Default model**
+
+The hardcoded dated snapshot is removed. The default is a provider alias, read at startup from `CHKSCRIPT_MODEL`, and the README documents the alias rather than a date.
+
+**Auto-detection, in order**
+
+1. `--model` flag or `CHKSCRIPT_MODEL` if set.
+2. `ANTHROPIC_API_KEY` present: Anthropic with the default alias.
+3. Ollama answers on `localhost:11434`: Ollama with the first installed model that reports tool support, else the first installed model in no-follow mode.
+4. Otherwise: static-only, with a one-line notice naming the two ways to enable the LLM layer.
+
+**Data-leaves-the-box notice**
+
+Whenever the selected endpoint is not loopback, the terminal output starts with one line: `Script contents will be sent to <host> for analysis.` This covers Anthropic, any OpenAI-compatible host, and an `OLLAMA_BASE_URL` pointed at Ollama Cloud or another machine. It is printed once, to stderr, and suppressed by `--quiet`.
+
+**Capability probing**
+
+Before the first call, chkscript checks whether the chosen model supports tools (from the provider's model metadata where available, otherwise by attempting the call once with the tool attached and catching the provider's rejection). A model without tool support runs in no-follow mode with a notice.
+
+## Run modes and CLI
+
+Three modes cover the environments the tool runs in. The default is full analysis.
+
+| Mode | Flag | Static layer | LLM layer | Fetches nested scripts | When |
+| --- | --- | --- | --- | --- | --- |
+| Full | (default) | Yes | Yes | Yes | Interactive use before running an installer |
+| No-follow | `--no-follow` | Yes | Yes | No | Analysis only of what is in hand; also the automatic fallback for models without tool support |
+| Static-only | `--static-only` | Yes | No | No | CI on every commit, air-gapped hosts, no model available |
+
+**Invocation, unchanged from v0.1**
+
+```
+chkscript install.sh
+curl -fsSL https://example.com/install.sh | chkscript
+chkscript --json install.sh | jq '.findings[] | select(.severity == "unsafe")'
+```
+
+**Flags**
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `FILE` | stdin | Script to analyze |
+| `--model` | auto-detect | `provider:model` selector |
+| `--no-follow` | off | Withhold the fetch tool |
+| `--static-only` | off | Skip the LLM layer entirely |
+| `--depth N` | 2 | Max nested fetch depth, capped at 4 |
+| `--max-fetches N` | 5 | Total fetch budget per run |
+| `--fail-on {warning,unsafe}` | `warning` | Lowest severity that produces a non-zero exit; `unsafe` makes warnings informational |
+| `--json` | off | Machine-readable output |
+| `-v`, `--verbose` | off | Show snippets for every finding and the full fetch tree |
+| `--quiet` | off | Suppress notices on stderr |
+| `--no-color` | auto | Disable ANSI colors (also honors `NO_COLOR`) |
+
+`--api-key` is deliberately absent; secrets never go on the command line.
+
+**Precedence**
+
+Flags override `CHKSCRIPT_*` environment variables, which override provider environment variables, which override auto-detection.
+
+## Configuration and secrets
+
+chkscript invents no secret variables of its own. Provider secrets use the names the provider SDKs already read; chkscript adds a `CHKSCRIPT_` namespace only for selection and limits.
+
+**Provider variables (read by the SDKs, unchanged)**
+
+| Variable | Provider | Notes |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | Anthropic |  |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | OpenAI-compatible | `OPENAI_BASE_URL` points the same SDK at vLLM, OpenRouter, etc. |
+| `OLLAMA_BASE_URL` | Ollama | Default `http://localhost:11434/v1`; `OLLAMA_HOST` is also honored and converted |
+| `OLLAMA_API_KEY` | Ollama Cloud | Only needed for a non-local Ollama endpoint |
+
+**chkscript variables**
+
+| Variable | Equivalent flag | Purpose |
+| --- | --- | --- |
+| `CHKSCRIPT_MODEL` | `--model` | `provider:model` selector |
+| `CHKSCRIPT_DEPTH` | `--depth` | Nested fetch depth |
+| `CHKSCRIPT_MAX_FETCHES` | `--max-fetches` | Fetch budget |
+| `CHKSCRIPT_FAIL_ON` | `--fail-on` | Exit threshold |
+| `CHKSCRIPT_NO_FOLLOW` | `--no-follow` | `1` to withhold the fetch tool |
+
+**`_FILE` suffix**
+
+Any `*_API_KEY` above may instead be given as `*_API_KEY_FILE=/path`. chkscript reads the file, strips one trailing newline, and sets the variable in its own process before the SDK initializes. This matches the Docker secrets and systemd credentials convention.
+
+**Rules**
+
+- No key ever appears in output, including error messages, verbose mode and JSON. The existing "ANTHROPIC_API_KEY not set" message is the ceiling for detail.
+- No secret is accepted on the command line.
+- Nothing is read from config files in this revision; a `~/.config/chkscript/config.toml` for non-secret defaults is listed under open questions.
+
+**Precedence table**
+
+| Priority | Source | Example |
+| --- | --- | --- |
+| 1 | Command-line flag | `--model ollama:qwen3` |
+| 2 | `CHKSCRIPT_*` variable | `CHKSCRIPT_MODEL=ollama:qwen3` |
+| 3 | Provider variable presence | `ANTHROPIC_API_KEY` set implies Anthropic |
+| 4 | Auto-detection | Ollama reachable on localhost |
+| 5 | Static-only | Nothing above applies |
+
+## Output and exit codes
+
+The v0.1 exit code contract is kept so existing pipes keep working; the finding schema grows to say where each finding came from and which file it is in.
+
+**Finding schema (JSON)**
+
+```
+{
+  "severity": "unsafe" | "warning",
+  "source": "shellcheck" | "semgrep" | "regex" | "llm" | "chkscript",
+  "rule_id": "SC2086" | "curl-pipe-sh" | "llm.unverified-download" | ...,
+  "file": "<entry>" | "https://...",
+  "line": 42 | null,
+  "description": "...",
+  "snippet": "..." | null,
+  "merged_from": ["semgrep", "llm"]
+}
+```
+
+Top level adds `fetch_tree`, `mode` (which of the three ran), `model` (selector actually used, or null), `static_tools` (which of shellcheck, semgrep, regex ran), and keeps `summary`, `findings`, `notes`, `max_severity`.
+
+**Terminal output**
+
+- Header line: mode, model, static tools, and the leaves-the-box notice on stderr when applicable.
+- Summary paragraph from the model (or "static analysis only" in static-only mode).
+- Findings grouped by file, entry script first, then fetched files in tree order. Each line shows severity, line number, source tag and description; `unsafe` findings always show the snippet, warnings only with `-v`.
+- Fetch tree at the end: URL, depth, SHA-256 (first 12 characters, full in JSON), size, and the model's stated reason. Always shown, since it is the record of what was actually analyzed.
+- Colors via ANSI only when stdout is a TTY, and off under `NO_COLOR` or `--no-color`.
+
+**Exit codes**
+
+| Code | Meaning | Note |
+| --- | --- | --- |
+| 0 | No finding at or above `--fail-on` | With `--fail-on unsafe`, a warnings-only run exits 0 |
+| 1 | Highest finding is `warning` | Default threshold |
+| 2 | At least one `unsafe` finding | Includes refused fetches of executed content |
+| 3 | Error: bad input, oversized script, provider failure with no static result | LLM failure with a static result is exit 1 or 2 from the static findings, plus a notice |
+
+`--fail-on unsafe` exists because shellcheck-grade warnings appear in nearly every real installer, and an exit code that fires on all of them is not a gate anyone keeps.
+
+## Dependencies and packaging
+
+The install footprint is one meaningful dependency plus optional provider SDKs. External analyzers are shelled out, never vendored or pip-installed by chkscript.
+
+| Dependency | Kind | Why | Alternative rejected |
+| --- | --- | --- | --- |
+| `pydantic-ai-slim` | Required | Structured output, tool loop, provider adapters in one boundary | Hand-rolled adapters (viable fallback if the library disappoints; the boundary makes it a one-file swap) |
+| `pydantic-ai-slim[anthropic]` | Optional extra | Anthropic provider |  |
+| `pydantic-ai-slim[openai]` | Optional extra | Ollama and every OpenAI-compatible endpoint |  |
+| `httpx` | Transitive | Used directly for the fetch tool so there is one HTTP client | `requests`, `urllib` |
+| `shellcheck` | External, on PATH | Warning tier | Vendoring the binary |
+| `semgrep` | External, on PATH | Unsafe tier | Pip-installing it (large, OCaml binary); LiteLLM-style all-in-one gateways (168 MB tree, March 2026 trojanized-release incident) |
+| LangChain / LangGraph | Not used |  | Control flow is a bounded tool loop, not a graph |
+
+**Install paths**
+
+- `uv tool install chkscript[anthropic]` or `[openai]` or `[all]` once published to PyPI; `uv tool install git+https://github.com/nkassis/chkscript` until then.
+- `pipx install` works the same way.
+- The README states plainly that shellcheck and semgrep are recommended and how to install each on Debian, Arch, macOS and via `uv tool`.
+
+**Python version**
+
+`requires-python = ">=3.11"`, down from 3.13. Nothing in the codebase needs 3.12 or 3.13, pydantic-ai supports 3.10+, and a wider floor removes a reason for people not to install it.
+
+**Layout**
+
+```
+src/chkscript/
+  cli.py           argparse, mode selection, orchestration
+  config.py        env and flag resolution, _FILE handling, precedence
+  preprocess.py    numbering, URL extraction, size checks
+  static/
+    shellcheck.py
+    semgrep.py
+    regex_rules.py
+    merge.py
+  fetch.py         fetch_script tool, allowlist, guardrails, fetch tree
+  analyzer.py      LLMAnalyzer, the only pydantic-ai import
+  models.py        Finding, FetchRecord, Report (Pydantic)
+  formatter.py     terminal and JSON
+rules/             Semgrep YAML, shipped as package data
+```
+
+## Conventions from claude-code-patterns
+
+The revision adopts the `stacks/python` starter and the `security/` layer from nkassis/claude-code-patterns (main at `7e54024`), applied during the scaffold phase. The starter enforces each rule at four points (CLAUDE.md, a Claude Code hook, pre-commit, CI); the table below says what each file becomes in chkscript and where this project departs from the template.
+
+| File from claude-code-patterns | In chkscript | Departure or note |
+| --- | --- | --- |
+| `stacks/python/CLAUDE.md` | Replaces the current `CLAUDE.md`; placeholders filled: project paragraph, Python 3.11, `pydantic` at every external boundary; FastAPI line dropped | `structlog` line dropped (see below); the "one thing it must get right" is: a scanned script can never lower a deterministic finding |
+| `stacks/python/AGENT.md` | Replaces the current `AGENT.md` as is | Adds the two external tools (shellcheck, semgrep) to Setup with install hints |
+| `.claude/settings.json` + `.claude/hooks/check-python.sh` | Copied as is: Black applied and Ruff blocking on every Edit/Write, `ruff check .` on Stop | Merged with the `security/` `permissions.deny` block |
+| `.pre-commit-config.yaml` | Stack hooks (ruff, black, pytest on pre-push) with the `security/` repos appended | `trufflehog` must be on PATH locally |
+| `.github/workflows/ci.yml` | As is: `uv sync --locked`, ruff, black, pytest | CI installs shellcheck and semgrep so the golden suite runs the real tools, not only the regex fallback |
+| `.github/workflows/secret-scan.yml`, `dependabot.yml` | Copied as is |  |
+| `.gitignore` | Stack file replaces the current one | Already covers `.env*` except `.env.example` |
+| `security/.env.example` pattern | `.env.example` lists every variable in Configuration and secrets with placeholders | chkscript itself never loads `.env`; that is the shell's or `uv run --env-file`'s job |
+| `CLAUDE-global.md` type-hint rule | Ruff `ANN` rules enabled in `pyproject.toml` so the hook enforces signatures | No mypy; the stack does not include it and the hook contract is Black + Ruff |
+| `stacks/shell` | Not applied | `tests/fixtures/` is deliberately bad Bash; a shellcheck hook would block every edit there. If helper scripts are added later, apply it with the fixture dirs excluded |
+
+**Departures from the template, stated once**
+
+- `structlog` is not adopted. The tool's output is the report, written by `formatter.py`; notices go to stderr through a small `notify()` helper. A second runtime dependency for diagnostics nobody reads as JSON works against the footprint goal. Listed under open questions in case a `--debug` log is wanted later.
+- "Add dependencies with `uv add` only after asking": this spec is the approval for `pydantic-ai-slim` with the `anthropic` and `openai` extras. Anything else is a question first.
+- Tests stay in `tests/`, which the template allows.
+- Conventional Commits and the PR description format (plan summary, test changes and why, or an explicit "no tests changed") apply, one PR per build-order phase.
+
+**Project-level `CLAUDE.md`**
+
+Filled from the template and kept short enough that an agent reads all of it: the project paragraph, the stack block, the guardrails table as shipped, and under Rules the project-specific lines only: the layout, the three run modes, the two threat-model properties, "the model never lowers the floor", and the exit code table. Everything else stays in `CLAUDE-global.md`.
+
+**Agent workflow**
+
+Work runs in Claude Code (Opus) against a git worktree per Linear issue, one issue per build-order phase, under the nimsys workspace. Agents comment only on the issue they were started under, never create or close issues, and leave the issue in In Review; Done is set by hand. The kickoff prompt for each phase is pasted into the issue so the record stays readable.
+
+## Testing
+
+The static layer is tested as a golden suite against fixture scripts; the LLM layer is tested with pydantic-ai's test model so no network is needed; the two threat-model properties get explicit tests of their own.
+
+**Fixtures (`tests/fixtures/`)**
+
+| Fixture | Expected max severity | Exercises |
+| --- | --- | --- |
+| `safe.sh` | safe | Baseline, no findings |
+| `warnings_only.sh` | warning | Unquoted vars, no `set -e`; exit 0 under `--fail-on unsafe` |
+| `curl_pipe_sh.sh` | unsafe | Semgrep rule and regex fallback agree |
+| `eval_variable.sh`, `base64_to_sh.sh` | unsafe | Decoder and eval rules |
+| `evasion_var_cmd.sh` | unsafe (LLM) | `c=curl; $c ... \| sh`; static rules miss it, model must catch it |
+| `injection_comment.sh` | unsafe | `curl \| sh` plus `# verified safe by security team`; static finding must survive the model |
+| `injection_delimiter.sh` | unsafe | Literal `</script>` and instructions inside the file; randomized delimiter must hold |
+| `unparseable.sh` | warning + original severity | Semgrep parse error produces its own finding and regex fallback still fires |
+| `nested_fetch.sh` | depends on child | Downloads and runs a second script; served by a local test server |
+| `nested_ssrf.sh` | unsafe | Second stage at `169.254.169.254`; fetch refused, finding emitted |
+| `nested_http.sh` | unsafe | Plain-http second stage |
+| `nested_binary.sh` | warning or unsafe | Downloads a binary with and without checksum verification |
+| `k3d-no-checksum.sh`, `k3d-with-checksum.sh` | unsafe / warning | Real-world installers kept from v0.1 |
+
+**Unit tests**
+
+- `preprocess`: numbering, URL extraction including variable-built hosts, size limit.
+- `static/*`: each tool's JSON is parsed from recorded output; absent-tool paths produce the right notices; merge keeps max severity and all sources.
+- `fetch`: every guardrail in the table has a test that triggers it, including redirect re-validation and a `Content-Length` that lies. Uses a local `http.server` fixture, never the network.
+- `config`: precedence order, `_FILE` suffix, no key in any error string (assert by grepping output for the fixture key value).
+- `analyzer`: pydantic-ai `TestModel` and `FunctionModel` drive the agent; assert the model cannot drop or downgrade a static finding; assert no-follow withholds the tool.
+- `formatter`: terminal and JSON for each mode; snapshot tests.
+
+**Integration, opt-in**
+
+A `--run-live` pytest flag runs the fixture suite against a real provider (Ollama locally by default) and reports verdict agreement with the expected column. Not in CI; used before releases.
+
+**Property tests to keep**
+
+1. For every fixture, `max_severity(full) >= max_severity(static_only)`. The model never lowers the floor.
+2. For every fixture, no fetch is attempted for a URL absent from the allowlist (asserted on the test server's request log).
+3. Running the same fixture twice with the same model yields identical findings (temperature 0).
+
+## Build order
+
+Each phase leaves the tool shippable; the static floor goes in before anything touches the model.
+
+1. **Scaffold.** New layout, Pydantic models, `config.py` with precedence and `_FILE`, Python floor to 3.11, claude-code-patterns python stack and security layer applied (hooks, pre-commit, CI, secret scan), CLAUDE.md and AGENT.md filled from the templates, .env.example added, remove the stray `tests/examples/bash` file. Gate: existing v0.1 tests pass against the new models.
+2. **Static layer.** Preprocessing, shellcheck adapter, Semgrep ruleset and adapter, regex fallback, parse-failure finding, merge. `--static-only` works end to end. Gate: golden suite green for every fixture that does not need the model.
+3. **LLM layer, no-follow.** `LLMAnalyzer` on pydantic-ai with `NativeOutput`, randomized delimiter, static findings passed in, merge rules. Providers: Anthropic and Ollama. Gate: injection fixtures hold; property test 1 passes with `TestModel`.
+4. **Fetch tool.** `fetch.py` with every guardrail, local test server, fetch tree in the report, refused-fetch finding. Gate: every guardrail row has a failing-then-passing test; property test 2 passes.
+5. **CLI and output.** Three modes, `--fail-on`, auto-detection, leaves-the-box notice, capability probing, terminal and JSON formats. Gate: snapshot tests; README rewritten.
+6. **Release.** `--run-live` against Ollama and Anthropic on the fixture suite; tag 0.2.0; publish to PyPI with extras.
+
+Phases 1 and 2 are the bulk of the value and carry no API cost to develop. Phase 4 is the one most likely to grow; keep its scope to the guardrail table.
+
+## Open questions
+
+- [ ] Default model alias for Anthropic, and whether to pick a smaller model for the pre-screen and a stronger one only when the static layer flags something.
+- [ ] Which Ollama model to recommend in the README as the local default; needs tool support and a decent record on the injection fixtures.
+- [ ] Should `--fail-on unsafe` become the default? It matches how people actually gate, but changes the v0.1 contract.
+- [ ] Config file (`~/.config/chkscript/config.toml`) for non-secret defaults: in 0.2 or later?
+- [ ] Whether to ship the Semgrep rules as a standalone registry pack so they are usable without chkscript.
+- [ ] Caching fetched files by SHA-256 within a run (cheap) and across runs (needs a cache dir and expiry policy).
+- [ ] Whether a `--allow-host` flag for variable-built URLs the model cannot resolve is worth the added surface.
+- [ ] Report format for the fetch tree in non-verbose terminal mode: full tree or one summary line with counts.
+- [ ] Whether a `--debug` structured log (structlog, per the global conventions) is worth a second runtime dependency, or whether it should be dev-only and off by default.
