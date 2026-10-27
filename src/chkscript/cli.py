@@ -7,7 +7,12 @@ import sys
 from typing import NoReturn
 
 from chkscript.analyzer import AnalysisError, ScriptTooLargeError, analyze
-from chkscript.config import DEFAULT_MODEL, ConfigError, load_config
+from chkscript.config import (
+    DEFAULT_HOSTED_MODEL,
+    DEFAULT_LOCAL_MODEL,
+    ConfigError,
+    load_config,
+)
 from chkscript.formatter import format_json, format_terminal
 
 logger = logging.getLogger("chkscript")
@@ -39,7 +44,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         default=None,
-        help=f"Claude model to use (default: $CHKSCRIPT_MODEL, else {DEFAULT_MODEL})",
+        help=(
+            "Model to use (default: $CHKSCRIPT_MODEL, else "
+            f"{DEFAULT_HOSTED_MODEL} when ANTHROPIC_API_KEY is set, "
+            f"else {DEFAULT_LOCAL_MODEL})"
+        ),
     )
     return parser
 

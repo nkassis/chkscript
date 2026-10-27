@@ -10,7 +10,8 @@ import pytest
 from chkscript import config
 from chkscript.cli import main
 from chkscript.config import (
-    DEFAULT_MODEL,
+    DEFAULT_HOSTED_MODEL,
+    DEFAULT_LOCAL_MODEL,
     ConfigError,
     Settings,
     apply_secret_files,
@@ -40,7 +41,7 @@ def _key_file(tmp_path: Path, content: str) -> Path:
 class TestDefaults:
     def test_defaults_when_nothing_is_set(self) -> None:
         settings = load_config()
-        assert settings.model == DEFAULT_MODEL
+        assert settings.model == DEFAULT_LOCAL_MODEL
         assert settings.depth == 2
         assert settings.max_fetches == 5
         assert settings.fail_on == "warning"
@@ -57,17 +58,17 @@ class TestDefaults:
         assert settings.fail_on == "unsafe"
         assert settings.no_follow is True
 
-    def test_anthropic_key_implies_default_model(
+    def test_anthropic_key_implies_hosted_model(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)
-        assert Settings().model == DEFAULT_MODEL
+        assert Settings().model == DEFAULT_HOSTED_MODEL
 
 
 class TestPrecedence:
     @pytest.fixture(autouse=True)
     def provider_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A provider default distinct from DEFAULT_MODEL, so each tier is visible.
+        # A provider default distinct from both defaults, so each tier is visible.
         monkeypatch.setattr(
             config,
             "_PROVIDER_DEFAULT_MODELS",
@@ -75,7 +76,7 @@ class TestPrecedence:
         )
 
     def test_default_when_no_provider_env(self) -> None:
-        assert load_config().model == DEFAULT_MODEL
+        assert load_config().model == DEFAULT_LOCAL_MODEL
 
     def test_provider_env_beats_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)

@@ -15,7 +15,10 @@ from typing import Literal
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+# Default models. Hosted is the Anthropic model the v0.1 analyzer calls; local is
+# the Ollama selector used when no provider variable is set (wired in phase 3).
+DEFAULT_HOSTED_MODEL = "claude-sonnet-5-5"
+DEFAULT_LOCAL_MODEL = "ollama:gpt-oss-20b"
 
 ENV_PREFIX = "CHKSCRIPT_"
 
@@ -24,7 +27,7 @@ _SECRET_FILE_SUFFIX = "_API_KEY_FILE"
 # Provider variable whose presence implies a provider, and that provider's model.
 # Checked in order; the first variable that is set wins.
 _PROVIDER_DEFAULT_MODELS: tuple[tuple[str, str], ...] = (
-    ("ANTHROPIC_API_KEY", DEFAULT_MODEL),
+    ("ANTHROPIC_API_KEY", DEFAULT_HOSTED_MODEL),
 )
 
 FailOn = Literal["warning", "unsafe"]
@@ -38,7 +41,7 @@ def _provider_default_model() -> str:
     for variable, model in _PROVIDER_DEFAULT_MODELS:
         if os.environ.get(variable):
             return model
-    return DEFAULT_MODEL
+    return DEFAULT_LOCAL_MODEL
 
 
 class Settings(BaseSettings):

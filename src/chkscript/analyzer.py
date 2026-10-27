@@ -5,7 +5,7 @@ import re
 
 import anthropic
 
-from chkscript.config import DEFAULT_MODEL
+from chkscript.config import DEFAULT_HOSTED_MODEL
 from chkscript.models import AnalysisResult, Finding, Severity
 
 _SYSTEM_PROMPT = (
@@ -54,7 +54,7 @@ class AnalysisError(Exception):
     pass
 
 
-def analyze(script: str, model: str = DEFAULT_MODEL) -> AnalysisResult:
+def analyze(script: str, model: str = DEFAULT_HOSTED_MODEL) -> AnalysisResult:
     if len(script.encode("utf-8")) > _MAX_SCRIPT_SIZE:
         raise ScriptTooLargeError(
             f"Script exceeds maximum size of {_MAX_SCRIPT_SIZE // 1024}KB"
