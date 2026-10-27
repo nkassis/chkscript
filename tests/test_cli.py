@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pytest_mock import MockerFixture
@@ -13,8 +16,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture(autouse=True)
-def set_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+def set_api_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # patch.dict restores all of os.environ, including keys load_config exports.
+    with patch.dict(os.environ):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        yield
 
 
 def _mock_result(
@@ -139,6 +145,39 @@ class TestCLI:
         monkeypatch.setattr("sys.argv", ["chkscript"])
         mock_stdin = mocker.patch("chkscript.cli.sys.stdin")
         mock_stdin.isatty.return_value = True
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 3
+
+    def test_model_from_chkscript_env(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        monkeypatch.setenv("CHKSCRIPT_MODEL", "env-model")
+        monkeypatch.setattr("sys.argv", ["chkscript", str(FIXTURES / "safe_script.sh")])
+        mock_analyze = mocker.patch(
+            "chkscript.cli.analyze", return_value=_mock_result()
+        )
+        with pytest.raises(SystemExit):
+            main()
+        _, kwargs = mock_analyze.call_args
+        assert kwargs["model"] == "env-model"
+
+    def test_api_key_file_satisfies_key_check(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture, tmp_path: Path
+    ) -> None:
+        key_file = tmp_path / "key"
+        key_file.write_text("file-key\n")
+        monkeypatch.delenv("ANTHROPIC_API_KEY")
+        monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(key_file))
+        monkeypatch.setattr("sys.argv", ["chkscript", str(FIXTURES / "safe_script.sh")])
+        mocker.patch("chkscript.cli.analyze", return_value=_mock_result())
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+
+    def test_invalid_config_exits_3(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CHKSCRIPT_FAIL_ON", "critical")
+        monkeypatch.setattr("sys.argv", ["chkscript", str(FIXTURES / "safe_script.sh")])
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 3
