@@ -1,0 +1,43 @@
+# Install once per machine: `uv tool install pre-commit`; once per clone: `pre-commit install --hook-type pre-commit --hook-type pre-push`
+repos:
+  # Lint and format with the versions in uv.lock, so hooks, Claude and CI agree.
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: black
+        name: black
+        entry: uv run black
+        language: system
+        types: [python]
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+  # Security hooks from claude-code-patterns security/.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: forbid-submodules
+
+  # Secret scanning. Runs on the staged diff at commit time and on the pushed range at push time.
+  # `--results=verified` keeps it quiet: a hit means a live credential, not a pattern match.
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.99.3
+    hooks:
+      - id: trufflehog
+        name: trufflehog (staged / pushed range)
+        entry: bash -c 'trufflehog git file://. --since-commit HEAD --results=verified --fail --no-update'
+        language: system
+        stages: [pre-commit, pre-push]
+        pass_filenames: false

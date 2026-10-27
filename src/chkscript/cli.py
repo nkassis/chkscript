@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from typing import NoReturn
 
 from chkscript.analyzer import AnalysisError, ScriptTooLargeError, analyze
+from chkscript.config import (
+    DEFAULT_HOSTED_MODEL,
+    DEFAULT_LOCAL_MODEL,
+    ConfigError,
+    load_config,
+)
 from chkscript.formatter import format_json, format_terminal
-from chkscript.models import Severity
+
+logger = logging.getLogger("chkscript")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -22,7 +30,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Script file to analyze (reads from stdin if omitted)",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Show detailed output including all code snippets",
     )
@@ -34,8 +43,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default="claude-sonnet-4-20250514",
-        help="Claude model to use (default: claude-sonnet-4-20250514)",
+        default=None,
+        help=(
+            "Model to use (default: $CHKSCRIPT_MODEL, else "
+            f"{DEFAULT_HOSTED_MODEL} when ANTHROPIC_API_KEY is set, "
+            f"else {DEFAULT_LOCAL_MODEL})"
+        ),
     )
     return parser
 
@@ -55,23 +68,41 @@ def _read_script(file_arg: str | None) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read()
 
-    _error("No input. Provide a file argument or pipe a script via stdin.\n"
-           "Usage: chkscript script.sh\n"
-           "       curl -fsSL https://example.com/install.sh | chkscript")
+    _error(
+        "No input. Provide a file argument or pipe a script via stdin.\n"
+        "Usage: chkscript script.sh\n"
+        "       curl -fsSL https://example.com/install.sh | chkscript"
+    )
+
+
+def _configure_logging() -> None:
+    # Fresh handler per run so it binds to the current sys.stderr.
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.handlers[:] = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
 
 
 def _error(msg: str) -> NoReturn:
-    print(f"Error: {msg}", file=sys.stderr)
+    logger.error("Error: %s", msg)
     sys.exit(3)
 
 
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    _configure_logging()
+
+    try:
+        settings = load_config(model=args.model)
+    except ConfigError as e:
+        _error(str(e))
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        _error("ANTHROPIC_API_KEY not set.\n"
-               "  export ANTHROPIC_API_KEY='your-key-here'")
+        _error(
+            "ANTHROPIC_API_KEY not set.\n" "  export ANTHROPIC_API_KEY='your-key-here'"
+        )
 
     script = _read_script(args.file)
 
@@ -79,7 +110,7 @@ def main() -> None:
         _error("Empty script provided")
 
     try:
-        result = analyze(script, model=args.model)
+        result = analyze(script, model=settings.model)
     except ScriptTooLargeError as e:
         _error(str(e))
     except AnalysisError as e:

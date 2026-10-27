@@ -6,7 +6,7 @@ from chkscript.formatter import format_json, format_terminal
 from chkscript.models import AnalysisResult, Finding, Severity
 
 
-def _safe_result():
+def _safe_result() -> AnalysisResult:
     return AnalysisResult(
         summary="Simple echo script",
         findings=[],
@@ -14,7 +14,7 @@ def _safe_result():
     )
 
 
-def _unsafe_result():
+def _unsafe_result() -> AnalysisResult:
     return AnalysisResult(
         summary="Dangerous installer",
         findings=[
@@ -36,24 +36,24 @@ def _unsafe_result():
 
 
 class TestFormatTerminal:
-    def test_safe_output(self):
+    def test_safe_output(self) -> None:
         output = format_terminal(_safe_result())
         assert "Summary" in output
         assert "Simple echo script" in output
         assert "No issues" in output
 
-    def test_unsafe_output(self):
+    def test_unsafe_output(self) -> None:
         output = format_terminal(_unsafe_result())
         assert "UNSAFE" in output
         assert "Pipes curl to bash" in output
         assert "curl -fsSL ... | bash" in output
 
-    def test_warning_output(self):
+    def test_warning_output(self) -> None:
         output = format_terminal(_unsafe_result())
         assert "WARNING" in output
         assert "No set -e" in output
 
-    def test_verbose_shows_warning_snippets(self):
+    def test_verbose_shows_warning_snippets(self) -> None:
         result = AnalysisResult(
             summary="test",
             findings=[
@@ -69,7 +69,7 @@ class TestFormatTerminal:
         assert "some code" not in default
         assert "some code" in verbose
 
-    def test_unsafe_snippet_shown_by_default(self):
+    def test_unsafe_snippet_shown_by_default(self) -> None:
         result = AnalysisResult(
             summary="test",
             findings=[
@@ -85,13 +85,13 @@ class TestFormatTerminal:
 
 
 class TestFormatJson:
-    def test_valid_json(self):
+    def test_valid_json(self) -> None:
         output = format_json(_safe_result())
         data = json.loads(output)
         assert data["summary"] == "Simple echo script"
         assert data["max_severity"] == "safe"
 
-    def test_findings_in_json(self):
+    def test_findings_in_json(self) -> None:
         output = format_json(_unsafe_result())
         data = json.loads(output)
         assert len(data["findings"]) == 2
@@ -99,7 +99,7 @@ class TestFormatJson:
         assert data["findings"][1]["severity"] == "warning"
         assert data["max_severity"] == "unsafe"
 
-    def test_json_has_all_fields(self):
+    def test_json_has_all_fields(self) -> None:
         output = format_json(_unsafe_result())
         data = json.loads(output)
         finding = data["findings"][0]

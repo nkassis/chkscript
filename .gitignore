@@ -1,11 +1,19 @@
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class
-*.egg-info/
+.pytest_cache/
+.ruff_cache/
 dist/
 build/
+*.egg-info/
 .eggs/
 *.egg
-.venv/
+
+# Secrets: never commit env files except the example.
 .env
-.pytest_cache/
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
