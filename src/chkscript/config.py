@@ -18,7 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Default models. Hosted is the Anthropic model the v0.1 analyzer calls; local is
 # the Ollama selector used when no provider variable is set (wired in phase 3).
 DEFAULT_HOSTED_MODEL = "claude-sonnet-5-5"
-DEFAULT_LOCAL_MODEL = "ollama:gpt-oss-20b"
+DEFAULT_LOCAL_MODEL = "ollama:gpt-oss:20b"
 
 ENV_PREFIX = "CHKSCRIPT_"
 
