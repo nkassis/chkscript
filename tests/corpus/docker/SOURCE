@@ -1,0 +1,6 @@
+url: https://get.docker.com
+fetched: 2026-10-28
+sha256: 7f966774378d94acf1817eb1aba213c21b576d01d1ee2f0656fe36e75ffa1258
+license: Apache-2.0
+license_url: https://github.com/docker/docker-install/blob/master/LICENSE
+note: Served from github.com/docker/docker-install.

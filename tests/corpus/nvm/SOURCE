@@ -1,0 +1,6 @@
+url: https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh
+fetched: 2026-10-28
+sha256: 48a0eee9a60e07422dce0eb5774754c83889570ca1ee2566c516acbe8af03a9e
+license: MIT
+license_url: https://github.com/nvm-sh/nvm/blob/master/LICENSE.md
+note: Pinned to v0.40.8, the latest nvm release on the fetch date.

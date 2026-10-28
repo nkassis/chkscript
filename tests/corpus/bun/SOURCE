@@ -1,0 +1,6 @@
+url: https://bun.sh/install
+fetched: 2026-10-28
+sha256: 04882bf41679d49d9af108657a1e5515bf04fdf2940d12c0d0b1e5d79dc53be8
+license: MIT
+license_url: https://github.com/oven-sh/bun/blob/main/LICENSE.md
+note: LICENSE.md states "Bun itself is MIT-licensed"; the installer is part of Bun, not of the LGPL components the file also lists.
