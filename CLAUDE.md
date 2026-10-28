@@ -52,4 +52,6 @@ If a hook blocks you, fix the reported problem. Do not add `# noqa` or per-file 
 
 Without `pyproject.toml` the hook falls back to `uvx` (ad-hoc tool versions). Needs `uv`; `jq` is used if present, else `python3`.
 
+`.claude/hooks/guard-bash.sh` (from claude-code-patterns `security/`) runs as **PreToolUse** on Bash: it blocks committing on, pushing to, or deleting `main`/`master`, and any force push. It reads the command line, so it catches mistakes, not bypasses; the server-side branch ruleset is the gate.
+
 `stacks/shell` is deliberately not applied: `tests/fixtures/` is intentionally bad Bash and `tests/corpus/` holds verbatim third-party installers.
