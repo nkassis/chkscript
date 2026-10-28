@@ -22,11 +22,16 @@ chkscript --json script.sh | jq '.findings[] | select(.severity == "unsafe")'
 
 # Verbose mode (show all code snippets)
 chkscript -v script.sh
+
+# Static rules only: no model, no API key
+chkscript --static-only script.sh
 ```
 
 ## Setup
 
-Requires an Anthropic API key:
+`shellcheck` and `semgrep` on `PATH` are recommended (`sudo apt install shellcheck`, `uv tool install semgrep`). Without them chkscript falls back to its built-in regex rules and says so on stderr.
+
+The default mode also requires an Anthropic API key (`--static-only` does not):
 
 ```bash
 export ANTHROPIC_API_KEY='your-key-here'
@@ -47,3 +52,5 @@ export ANTHROPIC_API_KEY='your-key-here'
 uv sync --group dev
 uv run pytest
 ```
+
+Tests that need `shellcheck` or `semgrep` skip when the tool is missing. Set `CHKSCRIPT_REQUIRE_TOOLS=1` (CI does) to make a missing tool fail the run instead.
