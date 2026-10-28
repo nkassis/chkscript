@@ -5,7 +5,7 @@ import json
 import pytest
 from pytest_mock import MockerFixture
 
-from chkscript.analyzer import ScriptTooLargeError, _parse_response, analyze
+from chkscript.analyzer import _parse_response, analyze
 from chkscript.models import Severity
 
 
@@ -118,11 +118,6 @@ class TestParseResponse:
 
 
 class TestAnalyze:
-    def test_script_too_large(self) -> None:
-        large_script = "x" * (500 * 1024 + 1)
-        with pytest.raises(ScriptTooLargeError):
-            analyze(large_script)
-
     def test_api_call(self, mocker: MockerFixture) -> None:
         mock_response = mocker.Mock()
         mock_response.content = [

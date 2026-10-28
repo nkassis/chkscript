@@ -107,3 +107,55 @@ class TestFormatJson:
         assert "description" in finding
         assert "line_reference" in finding
         assert "snippet" in finding
+
+
+def _static_result() -> AnalysisResult:
+    return AnalysisResult(
+        summary="Static analysis only.",
+        findings=[
+            Finding(
+                severity=Severity.UNSAFE,
+                description="Piped into a shell",
+                snippet="curl https://x | sh",
+                source="semgrep",
+                rule_id="curl-pipe-shell",
+                line=4,
+                merged_from=["semgrep", "regex"],
+            ),
+            Finding(
+                severity=Severity.WARNING,
+                description="Semgrep could not fully parse this file",
+                source="chkscript",
+                rule_id="semgrep-parse-error",
+            ),
+        ],
+        mode="static-only",
+        static_tools=["shellcheck", "semgrep", "regex"],
+    )
+
+
+class TestSourceAttribution:
+    def test_terminal_shows_sources_rule_and_line(self) -> None:
+        output = format_terminal(_static_result())
+        assert "[semgrep+regex curl-pipe-shell]" in output
+        assert "(line 4)" in output
+        assert "[chkscript semgrep-parse-error]" in output
+
+    def test_terminal_tags_llm_finding(self) -> None:
+        output = format_terminal(_unsafe_result())
+        assert "[llm]" in output
+        assert "(line 3)" in output
+
+    def test_json_finding_fields(self) -> None:
+        data = json.loads(format_json(_static_result()))
+        finding = data["findings"][0]
+        assert finding["source"] == "semgrep"
+        assert finding["rule_id"] == "curl-pipe-shell"
+        assert finding["file"] == "<entry>"
+        assert finding["line"] == 4
+        assert finding["merged_from"] == ["semgrep", "regex"]
+
+    def test_json_mode_and_static_tools(self) -> None:
+        data = json.loads(format_json(_static_result()))
+        assert data["mode"] == "static-only"
+        assert data["static_tools"] == ["shellcheck", "semgrep", "regex"]

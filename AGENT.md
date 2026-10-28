@@ -27,6 +27,10 @@ External tools, on `PATH`, never vendored or pip-installed by chkscript:
 | `uv run pytest` | Tests |
 | `pre-commit run --all-files` | Every hook against the whole tree |
 | `uv run chkscript FILE` | Run the CLI |
+| `uv run chkscript --static-only FILE` | Static layer only; no API key needed |
+| `CHKSCRIPT_REQUIRE_TOOLS=1 uv run pytest` | As CI runs it: tests needing shellcheck/semgrep fail instead of skipping when the tool is missing |
+
+Static layer layout: `src/chkscript/rules/*.yml` is the Semgrep ruleset (package data); `static/regex_rules.py` mirrors it with the same rule ids and messages, and `tests/test_rules.py` holds both engines to the same snippet corpus. Add a rule to both, plus cases to that corpus.
 
 ## Claude Code hooks
 

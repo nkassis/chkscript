@@ -16,9 +16,20 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Install Python and dependencies
         run: uv sync --locked
+      - name: Install static analyzers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          uv tool install semgrep==1.182.1
+          uv tool dir --bin >> "$GITHUB_PATH"
+          shellcheck --version
+          "$(uv tool dir --bin)/semgrep" --version
       - name: Lint
         run: uv run ruff check .
       - name: Format
         run: uv run black --check .
       - name: Test
+        env:
+          # A missing shellcheck/semgrep fails tool-gated tests instead of skipping.
+          CHKSCRIPT_REQUIRE_TOOLS: "1"
         run: uv run pytest
