@@ -1,6 +1,6 @@
-# AGENT.md
+# AGENTS.md
 
-Developer tooling. Commands run from the repo root.
+Developer tooling for chkscript, for every coding agent. Commands run from the repo root. Project rules (stack, guardrails, threat model, exit codes) are in `CLAUDE.md`.
 
 ## Setup
 
@@ -33,13 +33,3 @@ External tools, on `PATH`, never vendored or pip-installed by chkscript:
 Static layer layout: `src/chkscript/rules/*.yml` is the Semgrep ruleset (package data); `static/regex_rules.py` mirrors it with the same rule ids and messages, and `tests/test_rules.py` holds both engines to the same snippet corpus. Add a rule to both, plus cases to that corpus.
 
 Real-installer corpus: `tests/corpus/<name>/` holds a pinned `install.sh`, its `SOURCE` (URL, fetch date, SHA-256, license) and upstream `LICENSE`. `tests/corpus/expected.toml` records each installer's agreed verdict, and `uv run pytest tests/test_corpus.py` fails on any drift under either engine. A rule change that moves a corpus result updates the matching entry (verdict and note) in the same PR. To refresh an installer, re-fetch it, update `SOURCE`, and re-agree its entry.
-
-## Claude Code hooks
-
-`.claude/hooks/check-python.sh` runs from `.claude/settings.json`:
-- **PostToolUse** (Edit/Write): Black formats the file, then Ruff lints it; findings block Claude until fixed.
-- **Stop**: `ruff check .` across the project before Claude may finish.
-
-Without `pyproject.toml` the hook falls back to `uvx` (ad-hoc tool versions). Needs `uv`; `jq` is used if present, else `python3`.
-
-`stacks/shell` is deliberately not applied: `tests/fixtures/` is intentionally bad Bash and `tests/corpus/` holds verbatim third-party installers.
