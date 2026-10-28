@@ -1,0 +1,331 @@
+# Agreed static-layer verdicts for the real-installer corpus (tests/test_corpus.py).
+#
+# This records what the static layer does today; it is the baseline every rule
+# change is judged against. When a rule change moves a result, update the entry
+# and say why in the PR.
+#
+# Per installer: `max_severity`, and one [[<name>.finding]] per rule that fires:
+#   rule     static rule id (Semgrep/regex rule, shellcheck SC code, or a
+#            chkscript coverage warning)
+#   verdict  "true-positive": the matched code runs during install and does
+#            what the rule describes.
+#            "noise": the match is on text that never runs during install (a
+#            heredoc message, the body of a generated file), a wrong span, a
+#            lint that is not a safety concern, or a benign idiom the rule was
+#            not written for.
+#   note     one line; mktemp cleanups say "mktemp cleanup" so they can be counted
+#   lines    unsafe-tier rules only: the exact lines that fire
+#   engines  optional; defaults to both ["semgrep", "regex"]
+#
+# shellcheck and semgrep-parse-error entries are pinned by rule id, not line.
+
+[rustup]
+max_severity = "unsafe"
+
+[[rustup.finding]]
+rule = "unverified-download"
+lines = [175]
+verdict = "true-positive"
+note = "Downloads rustup-init over HTTPS and runs `chmod u+x` with no checksum or signature check; trust rests on TLS alone."
+
+[[rustup.finding]]
+rule = "semgrep-parse-error"
+engines = ["semgrep"]
+verdict = "noise"
+note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+
+[homebrew]
+max_severity = "unsafe"
+
+[[homebrew.finding]]
+rule = "unverified-download"
+lines = [614]
+verdict = "noise"
+note = "Fires on `sudo chmod 775 ${HOMEBREW_PREFIX}` inside an abort-message heredoc; Homebrew installs via git, not a downloaded executable."
+
+[[homebrew.finding]]
+rule = "eval-dynamic"
+lines = [1173, 1181]
+verdict = "noise"
+note = "Both are `eval \"$(brew shellenv)\"` text inside `cat <<EOS` instructions printed for the user, never run by the installer."
+
+[[homebrew.finding]]
+rule = "semgrep-parse-error"
+engines = ["semgrep"]
+verdict = "noise"
+note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+
+[nvm]
+max_severity = "unsafe"
+
+[[nvm.finding]]
+rule = "unverified-download"
+lines = [291]
+verdict = "true-positive"
+note = "Downloads nvm.sh, nvm-exec and completion over HTTPS (curl/wget path) and marks nvm-exec executable with no checksum check."
+
+[[nvm.finding]]
+rule = "semgrep-parse-error"
+engines = ["semgrep"]
+verdict = "noise"
+note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+
+[docker]
+max_severity = "warning"
+
+[[docker.finding]]
+rule = "SC2317"
+verdict = "noise"
+note = "shellcheck: unreachable command; a lint, not a safety concern."
+
+[[docker.finding]]
+rule = "semgrep-parse-error"
+engines = ["semgrep"]
+verdict = "noise"
+note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+
+[k3s]
+max_severity = "unsafe"
+
+[[k3s.finding]]
+rule = "rm-rf-variable"
+lines = [237, 354, 878, 943, 952]
+verdict = "noise"
+note = "237: constant BIN_DIR test path inside `sh -c`; 354: mktemp cleanup of TMP_DIR; 878, 943, 952: text of the generated killall/uninstall scripts (heredocs), not run at install."
+
+[[k3s.finding]]
+rule = "eval-dynamic"
+lines = [1203]
+verdict = "true-positive"
+note = "`eval set -- $(escape \"${INSTALL_K3S_EXEC}\") ...` evaluates environment-supplied text; deliberate and escaped, but exactly what the rule describes."
+
+[[k3s.finding]]
+rule = "insecure-permissions"
+lines = [580]
+engines = ["semgrep"]
+verdict = "noise"
+note = "Wrong span: `chown root:root ${TMP_BIN}` has no $HOME or /tmp path; the Semgrep regex's `(\\S+\\s+)*` runs across newlines to a later /tmp. The regex engine (per line) does not fire."
+
+[[k3s.finding]]
+rule = "semgrep-parse-error"
+engines = ["semgrep"]
+verdict = "noise"
+note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+
+[[k3s.finding]]
+rule = "SC2006"
+verdict = "noise"
+note = "shellcheck: legacy backticks; style lint."
+
+[[k3s.finding]]
+rule = "SC2034"
+verdict = "noise"
+note = "shellcheck: variable appears unused; lint."
+
+[[k3s.finding]]
+rule = "SC2046"
+verdict = "noise"
+note = "shellcheck: unquoted command substitution; robustness lint, not a safety concern."
+
+[[k3s.finding]]
+rule = "SC2086"
+verdict = "noise"
+note = "shellcheck: unquoted variables (57 hits); robustness lint, not a safety concern."
+
+[[k3s.finding]]
+rule = "SC2162"
+verdict = "noise"
+note = "shellcheck: read without -r; lint."
+
+[[k3s.finding]]
+rule = "SC2235"
+verdict = "noise"
+note = "shellcheck: subshell grouping where braces suffice; style lint."
+
+[[k3s.finding]]
+rule = "SC3009"
+verdict = "noise"
+note = "shellcheck: brace expansion is not POSIX sh; portability lint."
+
+[ollama]
+max_severity = "unsafe"
+
+[[ollama.finding]]
+rule = "rm-rf-variable"
+lines = [19]
+verdict = "noise"
+note = "mktemp cleanup: `rm -rf $TEMP_DIR` where TEMP_DIR=$(mktemp -d) on line 18."
+
+[[ollama.finding]]
+rule = "rm-rf-variable"
+lines = [166]
+verdict = "true-positive"
+note = "Runs `$SUDO rm -rf \"$OLLAMA_INSTALL_DIR/lib/ollama\"` as root on a variable path; low impact (an empty variable deletes /lib/ollama, not /)."
+
+[[ollama.finding]]
+rule = "persistence-append"
+lines = [215]
+verdict = "true-positive"
+note = "Writes /etc/systemd/system/ollama.service via `sudo tee`: real persistence, expected for a server install."
+
+[[ollama.finding]]
+rule = "SC2015"
+verdict = "noise"
+note = "shellcheck: `A && B || C` is not if-then-else; lint."
+
+[[ollama.finding]]
+rule = "SC2046"
+verdict = "noise"
+note = "shellcheck: unquoted command substitution; robustness lint, not a safety concern."
+
+[[ollama.finding]]
+rule = "SC2048"
+verdict = "noise"
+note = "shellcheck: unquoted $*; robustness lint."
+
+[[ollama.finding]]
+rule = "SC2086"
+verdict = "noise"
+note = "shellcheck: unquoted variables; robustness lint, not a safety concern."
+
+[[ollama.finding]]
+rule = "SC2143"
+verdict = "noise"
+note = "shellcheck: grep -q preferred over [ -n \"$(grep)\" ]; style lint."
+
+[[ollama.finding]]
+rule = "SC3043"
+verdict = "noise"
+note = "shellcheck: `local` is not POSIX sh; portability lint."
+
+[uv]
+max_severity = "unsafe"
+
+[[uv.finding]]
+rule = "rm-rf-variable"
+lines = [569, 1395]
+verdict = "noise"
+note = "mktemp cleanup: 569 removes _dir=$(mktemp -d); 1395 removes the two mktemp dirs from lines 1349-1350."
+
+[[uv.finding]]
+rule = "semgrep-parse-error"
+engines = ["semgrep"]
+verdict = "noise"
+note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+
+[bun]
+max_severity = "unsafe"
+
+[[bun.finding]]
+rule = "unverified-download"
+lines = [158]
+verdict = "true-positive"
+note = "Downloads the bun zip over HTTPS and runs `chmod +x` on the binary with no checksum or signature check."
+
+[[bun.finding]]
+rule = "SC2145"
+verdict = "noise"
+note = "shellcheck: argument mixes string and array; lint."
+
+[deno]
+max_severity = "unsafe"
+
+[[deno.finding]]
+rule = "unverified-download"
+lines = [85]
+verdict = "true-positive"
+note = "Downloads the deno zip over HTTPS and runs `chmod +x` with no checksum or signature check."
+
+[k3d-no-checksum]
+max_severity = "unsafe"
+
+[[k3d-no-checksum.finding]]
+rule = "unverified-download"
+lines = [144]
+verdict = "true-positive"
+note = "Downloads the k3d binary and runs `chmod +x` with no checksum check."
+
+[[k3d-no-checksum.finding]]
+rule = "rm-rf-variable"
+lines = [184]
+verdict = "noise"
+note = "mktemp cleanup: `rm -rf \"$K3D_TMP_ROOT\"` where K3D_TMP_ROOT=$(mktemp -dt ...) on line 131."
+
+[[k3d-no-checksum.finding]]
+rule = "SC1083"
+verdict = "noise"
+note = "shellcheck: literal brace in `%{url_effective}`; lint."
+
+[[k3d-no-checksum.finding]]
+rule = "SC2016"
+verdict = "noise"
+note = "shellcheck: expression in single quotes does not expand; lint."
+
+[[k3d-no-checksum.finding]]
+rule = "SC2086"
+verdict = "noise"
+note = "shellcheck: unquoted variable; robustness lint, not a safety concern."
+
+[[k3d-no-checksum.finding]]
+rule = "SC2124"
+verdict = "noise"
+note = "shellcheck: array assigned to a string; lint."
+
+[[k3d-no-checksum.finding]]
+rule = "SC2155"
+verdict = "noise"
+note = "shellcheck: declare and assign separately; lint."
+
+[[k3d-no-checksum.finding]]
+rule = "SC2166"
+verdict = "noise"
+note = "shellcheck: `[ p -a q ]` is not well defined; lint."
+
+[[k3d-no-checksum.finding]]
+rule = "SC2223"
+verdict = "noise"
+note = "shellcheck: unquoted default assignment; robustness lint."
+
+[k3d-with-checksum]
+max_severity = "unsafe"
+
+[[k3d-with-checksum.finding]]
+rule = "rm-rf-variable"
+lines = [221]
+verdict = "noise"
+note = "mktemp cleanup: `rm -rf \"$K3D_TMP_ROOT\"` where K3D_TMP_ROOT=$(mktemp -dt ...); the only unsafe finding on this script."
+
+[[k3d-with-checksum.finding]]
+rule = "SC1083"
+verdict = "noise"
+note = "shellcheck: literal brace in `%{url_effective}`; lint."
+
+[[k3d-with-checksum.finding]]
+rule = "SC2016"
+verdict = "noise"
+note = "shellcheck: expression in single quotes does not expand; lint."
+
+[[k3d-with-checksum.finding]]
+rule = "SC2086"
+verdict = "noise"
+note = "shellcheck: unquoted variable; robustness lint, not a safety concern."
+
+[[k3d-with-checksum.finding]]
+rule = "SC2124"
+verdict = "noise"
+note = "shellcheck: array assigned to a string; lint."
+
+[[k3d-with-checksum.finding]]
+rule = "SC2155"
+verdict = "noise"
+note = "shellcheck: declare and assign separately; lint."
+
+[[k3d-with-checksum.finding]]
+rule = "SC2166"
+verdict = "noise"
+note = "shellcheck: `[ p -a q ]` is not well defined; lint."
+
+[[k3d-with-checksum.finding]]
+rule = "SC2223"
+verdict = "noise"
+note = "shellcheck: unquoted default assignment; robustness lint."
