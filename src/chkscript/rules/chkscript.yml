@@ -1,0 +1,88 @@
+# chkscript unsafe tier: every rule here produces an `unsafe` finding.
+#
+# Rule ids are stable. static/regex_rules.py implements the same ids for when
+# Semgrep is absent or cannot parse a file. Users and the model both see each
+# message, so keep it to one line of rationale.
+#
+# Semgrep's Bash support is experimental, so most rules pair a structural
+# `pattern-inside` (the command shape, which keeps comments and quoted strings
+# out) with a `pattern-regex` for the details structural matching misses.
+rules:
+  - id: curl-pipe-shell
+    languages: [bash]
+    severity: ERROR
+    message: Downloaded content is piped straight into a shell, so whatever the server returns runs unreviewed.
+    patterns:
+      - pattern-inside: "... | $SH ..."
+      - metavariable-regex:
+          metavariable: $SH
+          regex: ^(sh|bash|zsh|sudo)$
+      - pattern-regex: \b(curl|wget)\b
+
+  - id: eval-dynamic
+    languages: [bash]
+    severity: ERROR
+    message: eval runs a string built from a variable or command output, which hides what actually executes.
+    patterns:
+      - pattern-inside: eval ...
+      - pattern-regex: \beval\b.*(\$|`)
+
+  - id: decode-to-shell
+    languages: [bash]
+    severity: ERROR
+    message: Decoded or decompressed data is fed to a shell, a common way to hide a payload from review.
+    patterns:
+      - pattern-inside: "... | $SH ..."
+      - metavariable-regex:
+          metavariable: $SH
+          regex: ^(sh|bash|zsh|sudo)$
+      - pattern-regex: (\bbase64\s+(.*\s)?(-d|--decode|-D)\b|\bxxd\s+(.*\s)?-r|\bopenssl\s+enc\s+(.*\s)?-d\b|\bgunzip\s+(.*\s)?-c\b)
+
+  - id: write-system-auth-file
+    languages: [bash]
+    severity: ERROR
+    message: The script writes to a system authentication or loader file, which can grant root or hijack every process.
+    pattern-regex: (?m)^[^#\n]*?((>{1,2}|\btee\s+(-a\s+)?|\b(cp|mv|install|ln)\s+[^;&|\n]*\s|\bsed\s+-i\S*\s+[^;&|\n]*\s)\s*["']?/etc/(sudoers|passwd\b|shadow\b|ld\.so\.preload\b))
+
+  - id: persistence-append
+    languages: [bash]
+    severity: ERROR
+    message: The script installs itself to run again later via a shell rc file, crontab or systemd unit.
+    pattern-regex: (?m)^[^#\n]*?(((>{1,2}|\btee\s+(-a\s+)?)\s*["']?(~|\$HOME|\$\{HOME\})/\.(bashrc|bash_profile|profile|zshrc)\b)|\|\s*crontab\s+-(\s|$)|\bcrontab\s+[^-\s]\S*|(>{1,2}|\btee\s+(-a\s+)?|\b(cp|mv|install)\s+[^;&|\n]*\s)\s*["']?(/etc/cron|/var/spool/cron|/etc/systemd/|/lib/systemd/|/usr/lib/systemd/|(~|\$HOME|\$\{HOME\})/\.config/systemd/))
+
+  - id: insecure-permissions
+    languages: [bash]
+    severity: ERROR
+    message: World-writable, setuid/setgid, or root-owned files in a user-writable location let other users escalate privileges.
+    pattern-regex: (?m)^[^#\n]*?(\bchmod\s+(-\S+\s+)*(0?777|[ugoa]*\+[rwxt]*s[rwxt]*|0?[2467][0-7]{3})(\s|$)|\bchown\s+(-\S+\s+)*root\S*\s+(\S+\s+)*["']?(~|\$HOME|\$\{HOME\}|/tmp)(/|\s|["']|$))
+
+  - id: rm-rf-variable
+    languages: [bash]
+    severity: ERROR
+    message: rm -rf on a path containing a variable deletes the wrong tree, or /, when the variable is empty or attacker-set.
+    pattern-regex: (?m)^[^#\n]*?\brm(?=(\s+-[\w-]+)*\s+(-[a-zA-Z]*[rR]|--recursive))(?=(\s+-[\w-]+)*\s+(-[a-zA-Z]*f|--force))(\s+-[\w-]+)+\s+[^;&|\n#]*\$
+
+  - id: disable-security
+    languages: [bash]
+    severity: ERROR
+    message: The script turns off a host security control (SELinux, a firewall, or a security service).
+    pattern-regex: (?m)^[^#\n]*?(\bsetenforce\s+0\b|\bufw\s+disable\b|\bsystemctl\s+(--\S+\s+)*disable\s+(--\S+\s+)*(apparmor|firewalld|ufw|auditd|fail2ban|iptables|nftables|clamav-daemon|clamd|falcon-sensor|osqueryd|wazuh-agent|selinux)\b)
+
+  - id: http-download
+    languages: [bash]
+    severity: ERROR
+    message: A download over plain http:// can be read or replaced by anyone on the network path.
+    patterns:
+      - pattern-either:
+          - pattern-inside: curl ...
+          - pattern-inside: wget ...
+      - pattern-regex: \bhttp://
+
+  - id: unverified-download
+    languages: [bash]
+    severity: ERROR
+    message: An executable is downloaded with no sha256sum, shasum, gpg --verify or cosign check anywhere in the script.
+    # Whole-file rule: fires on the first non-comment `chmod` that adds execute,
+    # if the script downloads and no non-comment line verifies. Comment lines are
+    # ignored so a comment such as "# verified with sha256sum" cannot suppress it.
+    pattern-regex: (?sm)\A(?=.*^[^#\n]*\b(curl|wget)\b)(?!.*^[^#\n]*(\bsha256sum\b|\bshasum\b|\bgpg\b[^#\n]*--verify|\bcosign\b)).*?^[^#\n]*?\K\bchmod\s+(-\S+\s+)*([ugoa]*\+[rwst]*x|0?[0-7]?[0-7]*[1357][0-7]*\b)
