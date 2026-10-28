@@ -11,6 +11,7 @@ from pytest_mock import MockerFixture
 
 from chkscript.cli import main
 from chkscript.models import AnalysisResult, Finding, Severity
+from chkscript.static import StaticResult
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -39,6 +40,13 @@ def _mock_result(
     return AnalysisResult(**defaults)
 
 
+@pytest.fixture
+def no_static(mocker: MockerFixture) -> None:
+    """Empty static layer, so a test exercises only the LLM path."""
+    mocker.patch("chkscript.cli.run_static", return_value=StaticResult())
+
+
+@pytest.mark.usefixtures("no_static")
 class TestCLI:
     def test_file_argument(
         self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
@@ -55,7 +63,7 @@ class TestCLI:
         monkeypatch.setattr("sys.argv", ["chkscript"])
         mock_stdin = mocker.patch("chkscript.cli.sys.stdin")
         mock_stdin.isatty.return_value = False
-        mock_stdin.read.return_value = "#!/bin/bash\necho hello"
+        mock_stdin.buffer.read.return_value = b"#!/bin/bash\necho hello"
         mocker.patch("chkscript.cli.analyze", return_value=_mock_result())
         with pytest.raises(SystemExit) as exc_info:
             main()
@@ -181,3 +189,101 @@ class TestCLI:
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 3
+
+
+class TestStaticOnly:
+    def test_unsafe_fixture_exits_2_without_api_key(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY")
+        analyze = mocker.patch("chkscript.cli.analyze")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["chkscript", "--static-only", str(FIXTURES / "curl_pipe_sh.sh")],
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
+        analyze.assert_not_called()
+
+    def test_safe_fixture_exits_0_without_api_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY")
+        monkeypatch.setattr(
+            "sys.argv", ["chkscript", "--static-only", str(FIXTURES / "safe.sh")]
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+
+    def test_json_reports_mode_tools_and_sources(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            "sys.argv",
+            ["chkscript", "--static-only", "--json", str(FIXTURES / "curl_pipe_sh.sh")],
+        )
+        with pytest.raises(SystemExit):
+            main()
+        data = json.loads(capsys.readouterr().out)
+        assert data["mode"] == "static-only"
+        assert {"semgrep", "regex"} & set(data["static_tools"])
+        pipe = [f for f in data["findings"] if f["rule_id"] == "curl-pipe-shell"]
+        assert pipe[0]["source"] in ("semgrep", "regex")
+        assert pipe[0]["line"] == 4
+        assert data["max_severity"] == "unsafe"
+
+    def test_stderr_lists_static_tools(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(
+            "sys.argv", ["chkscript", "--static-only", str(FIXTURES / "safe.sh")]
+        )
+        with pytest.raises(SystemExit):
+            main()
+        assert "Static tools: " in capsys.readouterr().err
+
+    def test_oversized_script_exits_3(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        big = tmp_path / "big.sh"
+        big.write_bytes(b"#" * (500 * 1024 + 1))
+        monkeypatch.setattr("sys.argv", ["chkscript", "--static-only", str(big)])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 3
+
+
+class TestDefaultMode:
+    def test_model_cannot_lower_static_floor(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        # The (mocked) model calls the script safe; the static unsafe finding stays.
+        monkeypatch.setattr(
+            "sys.argv", ["chkscript", str(FIXTURES / "curl_pipe_sh.sh")]
+        )
+        mocker.patch("chkscript.cli.analyze", return_value=_mock_result())
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 2
+
+    def test_json_combines_static_and_llm_findings(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            "sys.argv", ["chkscript", "--json", str(FIXTURES / "curl_pipe_sh.sh")]
+        )
+        mocker.patch(
+            "chkscript.cli.analyze", return_value=_mock_result(Severity.WARNING)
+        )
+        with pytest.raises(SystemExit):
+            main()
+        data = json.loads(capsys.readouterr().out)
+        assert data["mode"] == "full"
+        sources = {f["source"] for f in data["findings"]}
+        assert "llm" in sources
+        assert sources & {"semgrep", "regex"}

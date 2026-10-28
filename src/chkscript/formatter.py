@@ -46,13 +46,28 @@ def format_terminal(result: AnalysisResult, verbose: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _location(finding: Finding) -> str:
+    if finding.line is not None:
+        return f" (line {finding.line})"
+    if finding.line_reference:
+        return f" ({finding.line_reference})"
+    return ""
+
+
+def _source_tag(finding: Finding) -> str:
+    sources = "+".join(finding.merged_from or [finding.source])
+    rule = f" {finding.rule_id}" if finding.rule_id else ""
+    return f"[{sources}{rule}]"
+
+
 def _format_finding(lines: list[str], finding: Finding, verbose: bool) -> None:
-    loc = f" ({finding.line_reference})" if finding.line_reference else ""
+    loc = _location(finding)
+    tag = _source_tag(finding)
 
     if finding.severity == Severity.UNSAFE:
-        prefix = _c(_RED + _BOLD, f"!! UNSAFE: {finding.description}{loc}")
+        prefix = _c(_RED + _BOLD, f"!! UNSAFE {tag}: {finding.description}{loc}")
     else:
-        prefix = _c(_YELLOW, f"~~ WARNING: {finding.description}{loc}")
+        prefix = _c(_YELLOW, f"~~ WARNING {tag}: {finding.description}{loc}")
 
     lines.append(prefix)
 
@@ -69,13 +84,20 @@ def format_json(result: AnalysisResult) -> str:
         "findings": [
             {
                 "severity": finding.severity.name.lower(),
+                "source": finding.source,
+                "rule_id": finding.rule_id,
+                "file": finding.file,
+                "line": finding.line,
                 "description": finding.description,
                 "line_reference": finding.line_reference,
                 "snippet": finding.snippet,
+                "merged_from": finding.merged_from,
             }
             for finding in result.findings
         ],
         "notes": result.notes,
         "max_severity": result.max_severity.name.lower(),
+        "mode": result.mode,
+        "static_tools": result.static_tools,
     }
     return json.dumps(data, indent=2)

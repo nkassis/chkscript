@@ -6,7 +6,7 @@ import os
 import sys
 from typing import NoReturn
 
-from chkscript.analyzer import AnalysisError, ScriptTooLargeError, analyze
+from chkscript.analyzer import AnalysisError, analyze
 from chkscript.config import (
     DEFAULT_HOSTED_MODEL,
     DEFAULT_LOCAL_MODEL,
@@ -14,6 +14,10 @@ from chkscript.config import (
     load_config,
 )
 from chkscript.formatter import format_json, format_terminal
+from chkscript.models import AnalysisResult, ScriptBundle
+from chkscript.preprocess import ScriptTooLargeError, preprocess
+from chkscript.static import StaticResult, run_static
+from chkscript.static.merge import merge
 
 logger = logging.getLogger("chkscript")
 
@@ -21,7 +25,7 @@ logger = logging.getLogger("chkscript")
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="chkscript",
-        description="Analyze shell scripts for safety issues using Claude",
+        description="Analyze shell scripts for safety issues",
     )
     parser.add_argument(
         "file",
@@ -42,6 +46,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output as JSON",
     )
     parser.add_argument(
+        "--static-only",
+        action="store_true",
+        help="Run only the static layer (no model, no API key needed)",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help=(
@@ -53,10 +62,11 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _read_script(file_arg: str | None) -> str:
+def _read_script(file_arg: str | None) -> bytes:
+    # Raw bytes: decoding and line endings are preprocess.py's job.
     if file_arg:
         try:
-            with open(file_arg, encoding="utf-8", errors="replace") as f:
+            with open(file_arg, "rb") as f:
                 return f.read()
         except FileNotFoundError:
             _error(f"File not found: {file_arg}")
@@ -66,7 +76,7 @@ def _read_script(file_arg: str | None) -> str:
             _error(f"Cannot read file: {e}")
 
     if not sys.stdin.isatty():
-        return sys.stdin.read()
+        return sys.stdin.buffer.read()
 
     _error(
         "No input. Provide a file argument or pipe a script via stdin.\n"
@@ -89,6 +99,14 @@ def _error(msg: str) -> NoReturn:
     sys.exit(3)
 
 
+def _run_static(bundle: ScriptBundle) -> StaticResult:
+    static = run_static(bundle)
+    for notice in static.notices:
+        logger.info("Notice: %s", notice)
+    logger.info("Static tools: %s", ", ".join(static.tools))
+    return static
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -99,24 +117,45 @@ def main() -> None:
     except ConfigError as e:
         _error(str(e))
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not args.static_only and not os.environ.get("ANTHROPIC_API_KEY"):
         _error(
             "ANTHROPIC_API_KEY not set.\n" "  export ANTHROPIC_API_KEY='your-key-here'"
         )
 
-    script = _read_script(args.file)
+    raw = _read_script(args.file)
 
-    if not script.strip():
+    if not raw.strip():
         _error("Empty script provided")
 
     try:
-        result = analyze(script, model=settings.model)
+        bundle = preprocess(raw)
     except ScriptTooLargeError as e:
         _error(str(e))
-    except AnalysisError as e:
-        _error(str(e))
-    except KeyboardInterrupt:
-        sys.exit(3)
+
+    static = _run_static(bundle)
+
+    if args.static_only:
+        result = AnalysisResult(
+            summary="Static analysis only.",
+            findings=static.findings,
+            mode="static-only",
+            static_tools=static.tools,
+        )
+    else:
+        try:
+            llm = analyze(bundle.text, model=settings.model)
+        except AnalysisError as e:
+            _error(str(e))
+        except KeyboardInterrupt:
+            sys.exit(3)
+        # The model's findings go on top of the static floor; merge only raises.
+        result = llm.model_copy(
+            update={
+                "findings": merge([*static.findings, *llm.findings]),
+                "mode": "full",
+                "static_tools": static.tools,
+            }
+        )
 
     if args.json_output:
         print(format_json(result))
