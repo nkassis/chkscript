@@ -2,7 +2,7 @@
 
 Oct 25, 2026 · Nicolas Kassis
 
-Source of truth while drafting: https://claude.ai/artifact/3Jh8fnUy5uPzu1q14u3afe
+This file is the source of truth for the v0.2 design. Choices made during implementation are recorded in `docs/decisions.md`; where the two disagree, `decisions.md` wins and this file gets corrected.
 
 ## Goals and non-goals
 
@@ -15,7 +15,7 @@ v0.2 turns chkscript from a single Claude call into a layered scanner whose unsa
 - Swappable providers through one thin boundary, with Ollama as a first-class local option so the script never has to leave the box.
 - Reliable line references and schema-enforced structured output, replacing the fence-stripping regex and retry loop.
 - Three run modes (full, no-follow, static-only) so the tool stays useful in CI and on air-gapped hosts.
-- Keep the install footprint small: one meaningful Python dependency plus optional provider SDKs; external tools shelled out, never vendored.
+- Keep the install footprint small: pydantic-ai-slim and pydantic-settings plus optional provider SDKs; external tools shelled out, never vendored.
 
 **Non-goals**
 
@@ -90,6 +90,7 @@ The static layer runs first, on every script including fetched ones, and produce
   - `chmod 777`, `chmod +s`, `chown root` on paths under `$HOME` or `/tmp`
   - `rm -rf` with a variable in the path
   - `setenforce 0`, `ufw disable`, `systemctl disable` of a security service
+  - a plain `http://` download
   - download of an executable with no `sha256sum`, `shasum`, `gpg --verify` or `cosign` in the script
 - Each rule carries a one-line rationale in its message, which is what the model and the user both see.
 
@@ -178,19 +179,24 @@ Model selection is one string in pydantic-ai's `provider:model` form, so no prov
 
 | Provider | Selector example | Install extra | Reaches | Structured output |
 | --- | --- | --- | --- | --- |
-| Anthropic | `anthropic:claude-sonnet-4-5` | `anthropic` | api.anthropic.com | Tool-based |
-| Ollama (local) | `ollama:qwen3` | `openai` | `OLLAMA_BASE_URL`, default `http://localhost:11434/v1` | Native JSON schema, enforced during generation (Ollama 0.5+) |
+| Anthropic | `anthropic:claude-sonnet-5-5` | `anthropic` | api.anthropic.com | Tool-based |
+| Ollama (local) | `ollama:gpt-oss:20b` | `openai` | `OLLAMA_BASE_URL`, default `http://localhost:11434/v1` | Native JSON schema, enforced during generation (Ollama 0.5+) |
 | OpenAI-compatible | `openai:<model>` with `OPENAI_BASE_URL` | `openai` | vLLM, llama.cpp server, OpenRouter, hosted providers | Varies; tool-based fallback |
 
 **Default model**
 
-The hardcoded dated snapshot is removed. The default is a provider alias, read at startup from `CHKSCRIPT_MODEL`, and the README documents the alias rather than a date.
+Defaults live in `src/chkscript/config.py` and nowhere else, as provider aliases rather than dated snapshots (v0.1's `claude-sonnet-4-20250514` was retired and returned 404):
+
+- Hosted: `anthropic:claude-sonnet-5-5`. Until phase 3 replaces the v0.1 analyzer, `config.py` stores the bare `claude-sonnet-5-5` because that analyzer passes the string straight to the Anthropic SDK; phase 3 switches it to the prefixed form so both defaults use `provider:model`.
+- Local: `ollama:gpt-oss:20b`. The Ollama tag is `gpt-oss:20b`; pydantic-ai strips the `ollama:` prefix and passes the rest to Ollama. Chosen because it supports tool calling and structured output and fits in 16 GB of VRAM; provisional until the `--run-live` fixture suite confirms it holds on the injection fixtures.
+
+Any model can be selected with `--model` or `CHKSCRIPT_MODEL`.
 
 **Auto-detection, in order**
 
 1. `--model` flag or `CHKSCRIPT_MODEL` if set.
 2. `ANTHROPIC_API_KEY` present: Anthropic with the default alias.
-3. Ollama answers on `localhost:11434`: Ollama with the first installed model that reports tool support, else the first installed model in no-follow mode.
+3. Ollama answers on `localhost:11434`: the local default if it is installed, else the first installed model that reports tool support, else the first installed model in no-follow mode.
 4. Otherwise: static-only, with a one-line notice naming the two ways to enable the LLM layer.
 
 **Data-leaves-the-box notice**
@@ -278,8 +284,8 @@ Any `*_API_KEY` above may instead be given as `*_API_KEY_FILE=/path`. chkscript 
 
 | Priority | Source | Example |
 | --- | --- | --- |
-| 1 | Command-line flag | `--model ollama:qwen3` |
-| 2 | `CHKSCRIPT_*` variable | `CHKSCRIPT_MODEL=ollama:qwen3` |
+| 1 | Command-line flag | `--model ollama:gpt-oss:20b` |
+| 2 | `CHKSCRIPT_*` variable | `CHKSCRIPT_MODEL=ollama:gpt-oss:20b` |
 | 3 | Provider variable presence | `ANTHROPIC_API_KEY` set implies Anthropic |
 | 4 | Auto-detection | Ollama reachable on localhost |
 | 5 | Static-only | Nothing above applies |
@@ -320,18 +326,19 @@ Top level adds `fetch_tree`, `mode` (which of the three ran), `model` (selector 
 | 0 | No finding at or above `--fail-on` | With `--fail-on unsafe`, a warnings-only run exits 0 |
 | 1 | Highest finding is `warning` | Default threshold |
 | 2 | At least one `unsafe` finding | Includes refused fetches of executed content |
-| 3 | Error: bad input, oversized script, provider failure with no static result | LLM failure with a static result is exit 1 or 2 from the static findings, plus a notice |
+| 3 | Error: bad input, oversized script, config error, CLI usage error, provider failure with no static result | LLM failure with a static result is exit 1 or 2 from the static findings, plus a notice. argparse exits 2 on a usage error by default, which collides with "unsafe"; it must be mapped to 3 (NIM-74) |
 
 `--fail-on unsafe` exists because shellcheck-grade warnings appear in nearly every real installer, and an exit code that fires on all of them is not a gate anyone keeps.
 
 ## Dependencies and packaging
 
-The install footprint is one meaningful dependency plus optional provider SDKs. External analyzers are shelled out, never vendored or pip-installed by chkscript.
+The install footprint is pydantic-ai-slim and pydantic-settings plus optional provider SDKs. External analyzers are shelled out, never vendored or pip-installed by chkscript.
 
 | Dependency | Kind | Why | Alternative rejected |
 | --- | --- | --- | --- |
 | `pydantic-ai-slim` | Required | Structured output, tool loop, provider adapters in one boundary | Hand-rolled adapters (viable fallback if the library disappoints; the boundary makes it a one-file swap) |
 | `pydantic-ai-slim[anthropic]` | Optional extra | Anthropic provider |  |
+| `pydantic-settings` | Required | `CHKSCRIPT_*` parsing and validation in `config.py`; the global default for anything that reads env, and small since pydantic is already present | Hand-parsing `os.environ` |
 | `pydantic-ai-slim[openai]` | Optional extra | Ollama and every OpenAI-compatible endpoint |  |
 | `httpx` | Transitive | Used directly for the fetch tool so there is one HTTP client | `requests`, `urllib` |
 | `shellcheck` | External, on PATH | Warning tier | Vendoring the binary |
@@ -386,7 +393,10 @@ The revision adopts the `stacks/python` starter and the `security/` layer from n
 
 **Departures from the template, stated once**
 
-- `structlog` is not adopted. The tool's output is the report, written by `formatter.py`; notices go to stderr through a small `notify()` helper. A second runtime dependency for diagnostics nobody reads as JSON works against the footprint goal. Listed under open questions in case a `--debug` log is wanted later.
+- stdlib `logging` instead of structlog, which is the global default's own exit for a CLI whose logs are never shipped or queried. The report is written by `formatter.py`; notices and errors go to stderr through `logging`, never `print()`.
+- `argparse` instead of Click: a single command, no extra dependency.
+- `pydantic-settings` for config, per the global default for anything that reads env.
+- The full list, with dates, is in `docs/decisions.md`.
 - "Add dependencies with `uv add` only after asking": this spec is the approval for `pydantic-ai-slim` with the `anthropic` and `openai` extras. Anything else is a question first.
 - Tests stay in `tests/`, which the template allows.
 - Conventional Commits and the PR description format (plan summary, test changes and why, or an explicit "no tests changed") apply, one PR per build-order phase.
@@ -444,9 +454,9 @@ A `--run-live` pytest flag runs the fixture suite against a real provider (Ollam
 
 Each phase leaves the tool shippable; the static floor goes in before anything touches the model.
 
-1. **Scaffold.** New layout, Pydantic models, `config.py` with precedence and `_FILE`, Python floor to 3.11, claude-code-patterns python stack and security layer applied (hooks, pre-commit, CI, secret scan), CLAUDE.md and AGENT.md filled from the templates, .env.example added, remove the stray `tests/examples/bash` file. Gate: existing v0.1 tests pass against the new models.
-2. **Static layer.** Preprocessing, shellcheck adapter, Semgrep ruleset and adapter, regex fallback, parse-failure finding, merge. `--static-only` works end to end. Gate: golden suite green for every fixture that does not need the model.
-3. **LLM layer, no-follow.** `LLMAnalyzer` on pydantic-ai with `NativeOutput`, randomized delimiter, static findings passed in, merge rules. Providers: Anthropic and Ollama. Gate: injection fixtures hold; property test 1 passes with `TestModel`.
+1. **Scaffold** (NIM-71, merged). New layout, Pydantic models, `config.py` with precedence and `_FILE`, Python floor to 3.11, claude-code-patterns python stack and security layer applied (hooks, pre-commit, CI, secret scan), CLAUDE.md and AGENT.md filled from the templates, .env.example added, remove the stray `tests/examples/bash` file. Gate: existing v0.1 tests pass against the new models.
+2. **Static layer** (NIM-81). Preprocessing, shellcheck adapter, Semgrep ruleset and adapter, regex fallback, parse-failure finding, merge. `--static-only` works end to end with no API key. The default mode runs the static layer, then the v0.1 LLM pass, merged, so the floor applies before phase 3. Gate: golden suite green for every fixture that does not need the model.
+3. **LLM layer, no-follow.** `LLMAnalyzer` on pydantic-ai with `NativeOutput`, randomized delimiter, static findings passed in, merge rules. Providers: Anthropic and Ollama. The hosted default switches to `anthropic:claude-sonnet-5-5`, and `cli.py`'s hard `ANTHROPIC_API_KEY` check is removed in favor of the auto-detection order; until both happen, local mode cannot run. Gate: injection fixtures hold; property test 1 passes with `TestModel`.
 4. **Fetch tool.** `fetch.py` with every guardrail, local test server, fetch tree in the report, refused-fetch finding. Gate: every guardrail row has a failing-then-passing test; property test 2 passes.
 5. **CLI and output.** Three modes, `--fail-on`, auto-detection, leaves-the-box notice, capability probing, terminal and JSON formats. Gate: snapshot tests; README rewritten.
 6. **Release.** `--run-live` against Ollama and Anthropic on the fixture suite; tag 0.2.0; publish to PyPI with extras.
@@ -455,12 +465,12 @@ Phases 1 and 2 are the bulk of the value and carry no API cost to develop. Phase
 
 ## Open questions
 
-- [ ] Default model alias for Anthropic, and whether to pick a smaller model for the pre-screen and a stronger one only when the static layer flags something.
-- [ ] Which Ollama model to recommend in the README as the local default; needs tool support and a decent record on the injection fixtures.
+- [x] Default models: `anthropic:claude-sonnet-5-5` hosted, `ollama:gpt-oss:20b` local (see Providers and models). The local pick is confirmed or replaced by the `--run-live` suite in phase 6.
+- [ ] Whether to pre-screen with a smaller model (Haiku) and use the default only when the static layer flags something.
 - [ ] Should `--fail-on unsafe` become the default? It matches how people actually gate, but changes the v0.1 contract.
 - [ ] Config file (`~/.config/chkscript/config.toml`) for non-secret defaults: in 0.2 or later?
 - [ ] Whether to ship the Semgrep rules as a standalone registry pack so they are usable without chkscript.
 - [ ] Caching fetched files by SHA-256 within a run (cheap) and across runs (needs a cache dir and expiry policy).
 - [ ] Whether a `--allow-host` flag for variable-built URLs the model cannot resolve is worth the added surface.
 - [ ] Report format for the fetch tree in non-verbose terminal mode: full tree or one summary line with counts.
-- [ ] Whether a `--debug` structured log (structlog, per the global conventions) is worth a second runtime dependency, or whether it should be dev-only and off by default.
+- [x] Logging: stdlib `logging` to stderr, no structlog. A `--debug` flag, if wanted, only raises the log level.
