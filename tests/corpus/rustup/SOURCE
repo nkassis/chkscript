@@ -1,0 +1,6 @@
+url: https://sh.rustup.rs
+fetched: 2026-10-28
+sha256: 9502b514362a21096210d498f143b8cdacda365d3dfcf45e8f5541e089ccafc0
+license: MIT OR Apache-2.0
+license_url: https://github.com/rust-lang/rustup/blob/main/LICENSE-MIT
+note: LICENSE holds the MIT text (the dual license's MIT option).

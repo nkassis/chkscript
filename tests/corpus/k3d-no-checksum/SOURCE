@@ -1,0 +1,6 @@
+url: https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh
+fetched: unknown (committed to this repo 2026-03-07)
+sha256: 0f6bd9a3ab8ea8625843b21657a6538f117975bb2823b73200dc8b92ccc626de
+license: MIT
+license_url: https://github.com/k3d-io/k3d/blob/main/LICENSE
+note: Copy of k3d's installer kept from v0.1 of this repo.
