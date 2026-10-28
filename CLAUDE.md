@@ -2,7 +2,9 @@
 
 chkscript is a CLI that tells people whether a shell script (usually an installer about to be piped into `sh`) is safe to run, and why. It layers deterministic scanners (shellcheck, Semgrep, a regex fallback) under an LLM that adds intent analysis. The one thing it must get right: no text inside a scanned script can lower the severity of a deterministic finding. The v0.2 design is `docs/spec.md` (branch `docs/v0.2-spec` until merged).
 
-`AGENT.md` has the tooling commands. When a question is not answered here, stop and ask; do not decide silently.
+`AGENTS.md` has the tooling (setup, external tools, commands, corpus workflow) and is imported below. When a question is not answered here, stop and ask; do not decide silently.
+
+@AGENTS.md
 
 ## Stack
 
@@ -41,3 +43,15 @@ If a hook blocks you, fix the reported problem. Do not add `# noqa` or per-file 
 | 1 | Highest finding is `warning` |
 | 2 | At least one `unsafe` finding |
 | 3 | Error: bad input, oversized script, config error, provider failure with no static result |
+
+## Claude Code hooks
+
+`.claude/hooks/check-python.sh` runs from `.claude/settings.json`:
+- **PostToolUse** (Edit/Write): Black formats the file, then Ruff lints it; findings block Claude until fixed.
+- **Stop**: `ruff check .` across the project before Claude may finish.
+
+Without `pyproject.toml` the hook falls back to `uvx` (ad-hoc tool versions). Needs `uv`; `jq` is used if present, else `python3`.
+
+`.claude/hooks/guard-bash.sh` (from claude-code-patterns `security/`) runs as **PreToolUse** on Bash: it blocks committing on, pushing to, or deleting `main`/`master`, and any force push. It reads the command line, so it catches mistakes, not bypasses; the server-side branch ruleset is the gate.
+
+`stacks/shell` is deliberately not applied: `tests/fixtures/` is intentionally bad Bash and `tests/corpus/` holds verbatim third-party installers.
