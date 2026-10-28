@@ -30,14 +30,7 @@ GOLDEN: dict[str, tuple[Severity, set[str]]] = {
     "fixtures/http_download.sh": (Severity.UNSAFE, {"http-download"}),
     "fixtures/binary_no_checksum.sh": (Severity.UNSAFE, {"unverified-download"}),
     "fixtures/binary_with_checksum.sh": (Severity.SAFE, set()),
-    # Both k3d installers end with `rm -rf "$K3D_TMP_ROOT"`, so rm-rf-variable
-    # fires on each. The spec's table says "warning" for the checksum variant;
-    # the rule is kept as specified instead (docs/decisions.md, 2026-10-28).
-    "examples/k3d-no-checksum.sh": (
-        Severity.UNSAFE,
-        {"rm-rf-variable", "unverified-download"},
-    ),
-    "examples/k3d-with-checksum.sh": (Severity.UNSAFE, {"rm-rf-variable"}),
+    # The k3d installers moved to tests/corpus/ and are pinned by test_corpus.py.
 }
 
 
