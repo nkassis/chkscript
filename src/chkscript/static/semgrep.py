@@ -44,7 +44,7 @@ def run(bundle: ScriptBundle) -> SemgrepOutcome:
     rules = resources.files("chkscript") / "rules"
     with tempfile.TemporaryDirectory() as tmp, resources.as_file(rules) as rules_dir:
         target = Path(tmp) / "script.sh"
-        target.write_text(bundle.text, encoding="utf-8")
+        target.write_text(bundle.rules_text, encoding="utf-8")
         try:
             proc = subprocess.run(
                 [

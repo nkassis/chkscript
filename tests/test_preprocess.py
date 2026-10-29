@@ -9,6 +9,7 @@ from chkscript.preprocess import (
     MAX_SCRIPT_SIZE,
     ScriptTooLargeError,
     extract_urls,
+    join_continuations,
     number_lines,
     preprocess,
 )
@@ -39,6 +40,36 @@ class TestPreprocess:
         assert bundle.line_text(2) == "two"
         assert bundle.line_text(0) is None
         assert bundle.line_text(99) is None
+
+
+class TestJoinContinuations:
+    def test_joins_onto_first_line_and_keeps_line_count(self) -> None:
+        text = 'a\nrm -rf \\\n  "$DIR"\nb\n'
+        joined = join_continuations(text)
+        assert joined == 'a\nrm -rf   "$DIR"\n\nb\n'
+        assert joined.count("\n") == text.count("\n")
+
+    def test_three_line_continuation(self) -> None:
+        assert join_continuations("x \\\ny \\\nz\nend") == "x y z\n\n\nend"
+
+    def test_joins_without_separator_like_bash(self) -> None:
+        assert join_continuations("cu\\\nrl x | sh") == "curl x | sh\n"
+
+    def test_backslash_ending_a_comment_does_not_join(self) -> None:
+        text = '# clean up \\\nrm -rf "$DIR"'
+        assert join_continuations(text) == text
+
+    def test_escaped_backslash_does_not_join(self) -> None:
+        text = "echo a\\\\\necho b"
+        assert join_continuations(text) == text
+
+    def test_trailing_continuation_at_end_of_file(self) -> None:
+        assert join_continuations("a \\\nb \\") == "a b \n"
+
+    def test_bundle_keeps_original_text_for_shellcheck_and_model(self) -> None:
+        bundle = preprocess(b"a \\\nb\n")
+        assert bundle.text == "a \\\nb\n"
+        assert bundle.rules_text == "a b\n\n"
 
 
 class TestNumberLines:

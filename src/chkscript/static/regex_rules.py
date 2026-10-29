@@ -1,8 +1,9 @@
 """Plain-regex version of the Semgrep ruleset, with the same rule ids and messages.
 
 Runs when Semgrep is not on PATH, and on any file Semgrep could not fully parse.
-Matching is per logical line (backslash continuations joined) with comments
-stripped, so a commented-out command never fires and a comment never hides one.
+Matching is per line of `ScriptBundle.rules_text` (backslash continuations
+already joined, the same text Semgrep scans) with comments stripped, so a
+commented-out command never fires and a comment never hides one.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import re
 from typing import NamedTuple
 
 from chkscript.models import Finding, ScriptBundle, Severity
+from chkscript.preprocess import COMMENT
 
 
 class RegexRule(NamedTuple):
@@ -127,32 +129,16 @@ RULE_IDS: frozenset[str] = frozenset(
 )
 
 
-# A `#` starts a comment at the start of a word; `$#` and URL fragments do not.
-_COMMENT = re.compile(r"(?:^|(?<=[ \t]))#.*$")
-
-
-def logical_lines(text: str) -> list[tuple[int, str]]:
-    """(first physical line number, comment-stripped text) per logical line."""
-    result: list[tuple[int, str]] = []
-    pending: list[str] = []
-    start = 1
-    for number, physical in enumerate(text.split("\n"), 1):
-        if not pending:
-            start = number
-        stripped = _COMMENT.sub("", physical)
-        if stripped.endswith("\\") and not stripped.endswith("\\\\"):
-            pending.append(stripped[:-1])
-            continue
-        pending.append(stripped)
-        result.append((start, " ".join(pending)))
-        pending = []
-    if pending:
-        result.append((start, " ".join(pending)))
-    return result
+def code_lines(rules_text: str) -> list[tuple[int, str]]:
+    """(line number, comment-stripped text) for each line of the joined text."""
+    return [
+        (number, COMMENT.sub("", line))
+        for number, line in enumerate(rules_text.split("\n"), 1)
+    ]
 
 
 def run(bundle: ScriptBundle) -> list[Finding]:
-    lines = logical_lines(bundle.text)
+    lines = code_lines(bundle.rules_text)
     findings = [
         _finding(bundle, rule, number)
         for number, line in lines
