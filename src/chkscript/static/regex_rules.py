@@ -19,13 +19,13 @@ class RegexRule(NamedTuple):
     pattern: re.Pattern[str]
 
 
-_SHELL_STAGE = r"(?<!\|)\|(?!\|)\s*(?:sh|bash|zsh|sudo)\b"
+_SHELL_STAGE = r"(?<!\|)\|(?!\|)[ \t]*(?:sh|bash|zsh|sudo)\b"
 _HOME = r"(?:~|\$HOME|\$\{HOME\})"
-_WRITE = r"(?:>{1,2}|\btee\s+(?:-a\s+)?)"
-_COPY_TO = r"\b(?:cp|mv|install)\s+[^;&|\n]*\s"
+_WRITE = r"(?:>{1,2}|\btee[ \t]+(?:-a[ \t]+)?)"
+_COPY_TO = r"\b(?:cp|mv|install)[ \t]+[^;&|\n]*[ \t]"
 _DECODER = (
-    r"(?:\bbase64\s+(?:.*\s)?(?:-d|--decode|-D)\b|\bxxd\s+(?:.*\s)?-r"
-    r"|\bopenssl\s+enc\s+(?:.*\s)?-d\b|\bgunzip\s+(?:.*\s)?-c\b)"
+    r"(?:\bbase64[ \t]+(?:.*[ \t])?(?:-d|--decode|-D)\b|\bxxd[ \t]+(?:.*[ \t])?-r"
+    r"|\bopenssl[ \t]+enc[ \t]+(?:.*[ \t])?-d\b|\bgunzip[ \t]+(?:.*[ \t])?-c\b)"
 )
 _SECURITY_SERVICES = (
     "apparmor|firewalld|ufw|auditd|fail2ban|iptables|nftables|clamav-daemon"
@@ -43,7 +43,7 @@ LINE_RULES: tuple[RegexRule, ...] = (
         "eval-dynamic",
         "eval runs a string built from a variable or command output, which hides "
         "what actually executes.",
-        re.compile(r"(?:^|[;&|({]|\b(?:then|do|else)\b)\s*eval\s+.*[$`]"),
+        re.compile(r"(?:^|[;&|({]|\b(?:then|do|else)\b)[ \t]*eval[ \t]+.*[$`]"),
     ),
     RegexRule(
         "decode-to-shell",
@@ -56,9 +56,9 @@ LINE_RULES: tuple[RegexRule, ...] = (
         "The script writes to a system authentication or loader file, which can "
         "grant root or hijack every process.",
         re.compile(
-            rf"(?:{_WRITE}|\b(?:cp|mv|install|ln)\s+[^;&|\n]*\s"
-            r"|\bsed\s+-i\S*\s+[^;&|\n]*\s)"
-            r"\s*[\"']?/etc/(?:sudoers|passwd\b|shadow\b|ld\.so\.preload\b)"
+            rf"(?:{_WRITE}|\b(?:cp|mv|install|ln)[ \t]+[^;&|\n]*[ \t]"
+            r"|\bsed[ \t]+-i\S*[ \t]+[^;&|\n]*[ \t])"
+            r"[ \t]*[\"']?/etc/(?:sudoers|passwd\b|shadow\b|ld\.so\.preload\b)"
         ),
     ),
     RegexRule(
@@ -66,9 +66,9 @@ LINE_RULES: tuple[RegexRule, ...] = (
         "The script installs itself to run again later via a shell rc file, "
         "crontab or systemd unit.",
         re.compile(
-            rf"(?:{_WRITE}\s*[\"']?{_HOME}/\.(?:bashrc|bash_profile|profile|zshrc)\b"
-            r"|\|\s*crontab\s+-(?:\s|$)|\bcrontab\s+[^-\s]\S*"
-            rf"|(?:{_WRITE}|{_COPY_TO})\s*[\"']?(?:/etc/cron|/var/spool/cron"
+            rf"(?:{_WRITE}[ \t]*[\"']?{_HOME}/\.(?:bashrc|bash_profile|profile|zshrc)\b"
+            r"|\|[ \t]*crontab[ \t]+-(?:[ \t]|$)|\bcrontab[ \t]+[^-\s]\S*"
+            rf"|(?:{_WRITE}|{_COPY_TO})[ \t]*[\"']?(?:/etc/cron|/var/spool/cron"
             rf"|/etc/systemd/|/lib/systemd/|/usr/lib/systemd/|{_HOME}/\.config/systemd/))"
         ),
     ),
@@ -77,10 +77,10 @@ LINE_RULES: tuple[RegexRule, ...] = (
         "World-writable, setuid/setgid, or root-owned files in a user-writable "
         "location let other users escalate privileges.",
         re.compile(
-            r"\bchmod\s+(?:-\S+\s+)*(?:0?777|[ugoa]*\+[rwxt]*s[rwxt]*|0?[2467][0-7]{3})"
-            r"(?:\s|$)"
-            rf"|\bchown\s+(?:-\S+\s+)*root\S*\s+(?:\S+\s+)*[\"']?(?:{_HOME}|/tmp)"
-            r"(?:/|\s|[\"']|$)"
+            r"\bchmod[ \t]+(?:-\S+[ \t]+)*"
+            r"(?:0?777|[ugoa]*\+[rwxt]*s[rwxt]*|0?[2467][0-7]{3})(?:[ \t]|$)"
+            r"|\bchown[ \t]+(?:-\S+[ \t]+)*root\S*[ \t]+(?:\S+[ \t]+)*"
+            rf"[\"']?(?:{_HOME}|/tmp)(?:/|[ \t]|[\"']|$)"
         ),
     ),
     RegexRule(
@@ -88,9 +88,9 @@ LINE_RULES: tuple[RegexRule, ...] = (
         "rm -rf on a path containing a variable deletes the wrong tree, or /, when "
         "the variable is empty or attacker-set.",
         re.compile(
-            r"\brm(?=(?:\s+-[\w-]+)*\s+(?:-[a-zA-Z]*[rR]|--recursive))"
-            r"(?=(?:\s+-[\w-]+)*\s+(?:-[a-zA-Z]*f|--force))"
-            r"(?:\s+-[\w-]+)+\s+[^;&|\n]*\$"
+            r"\brm(?=(?:[ \t]+-[\w-]+)*[ \t]+(?:-[a-zA-Z]*[rR]|--recursive))"
+            r"(?=(?:[ \t]+-[\w-]+)*[ \t]+(?:-[a-zA-Z]*f|--force))"
+            r"(?:[ \t]+-[\w-]+)+[ \t]+[^;&|\n]*\$"
         ),
     ),
     RegexRule(
@@ -98,8 +98,8 @@ LINE_RULES: tuple[RegexRule, ...] = (
         "The script turns off a host security control (SELinux, a firewall, or a "
         "security service).",
         re.compile(
-            r"\bsetenforce\s+0\b|\bufw\s+disable\b"
-            r"|\bsystemctl\s+(?:--\S+\s+)*disable\s+(?:--\S+\s+)*"
+            r"\bsetenforce[ \t]+0\b|\bufw[ \t]+disable\b"
+            r"|\bsystemctl[ \t]+(?:--\S+[ \t]+)*disable[ \t]+(?:--\S+[ \t]+)*"
             rf"(?:{_SECURITY_SERVICES})\b"
         ),
     ),
@@ -115,7 +115,9 @@ UNVERIFIED_DOWNLOAD = RegexRule(
     "unverified-download",
     "An executable is downloaded with no sha256sum, shasum, gpg --verify or cosign "
     "check anywhere in the script.",
-    re.compile(r"\bchmod\s+(?:-\S+\s+)*(?:[ugoa]*\+[rwst]*x|[0-7]*[1357][0-7]*\b)"),
+    re.compile(
+        r"\bchmod[ \t]+(?:-\S+[ \t]+)*(?:[ugoa]*\+[rwst]*x|[0-7]*[1357][0-7]*\b)"
+    ),
 )
 _DOWNLOAD = re.compile(r"\b(?:curl|wget)\b")
 _VERIFY = re.compile(r"\bsha256sum\b|\bshasum\b|\bgpg\b.*--verify|\bcosign\b")
@@ -124,8 +126,9 @@ RULE_IDS: frozenset[str] = frozenset(
     rule.rule_id for rule in (*LINE_RULES, UNVERIFIED_DOWNLOAD)
 )
 
+
 # A `#` starts a comment at the start of a word; `$#` and URL fragments do not.
-_COMMENT = re.compile(r"(?:^|(?<=\s))#.*$")
+_COMMENT = re.compile(r"(?:^|(?<=[ \t]))#.*$")
 
 
 def logical_lines(text: str) -> list[tuple[int, str]]:

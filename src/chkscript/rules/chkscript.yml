@@ -36,37 +36,37 @@ rules:
       - metavariable-regex:
           metavariable: $SH
           regex: ^(sh|bash|zsh|sudo)$
-      - pattern-regex: (\bbase64\s+(.*\s)?(-d|--decode|-D)\b|\bxxd\s+(.*\s)?-r|\bopenssl\s+enc\s+(.*\s)?-d\b|\bgunzip\s+(.*\s)?-c\b)
+      - pattern-regex: (\bbase64[ \t]+(.*[ \t])?(-d|--decode|-D)\b|\bxxd[ \t]+(.*[ \t])?-r|\bopenssl[ \t]+enc[ \t]+(.*[ \t])?-d\b|\bgunzip[ \t]+(.*[ \t])?-c\b)
 
   - id: write-system-auth-file
     languages: [bash]
     severity: ERROR
     message: The script writes to a system authentication or loader file, which can grant root or hijack every process.
-    pattern-regex: (?m)^[^#\n]*?((>{1,2}|\btee\s+(-a\s+)?|\b(cp|mv|install|ln)\s+[^;&|\n]*\s|\bsed\s+-i\S*\s+[^;&|\n]*\s)\s*["']?/etc/(sudoers|passwd\b|shadow\b|ld\.so\.preload\b))
+    pattern-regex: (?m)^[^#\n]*?((>{1,2}|\btee[ \t]+(-a[ \t]+)?|\b(cp|mv|install|ln)[ \t]+[^;&|\n]*[ \t]|\bsed[ \t]+-i\S*[ \t]+[^;&|\n]*[ \t])[ \t]*["']?/etc/(sudoers|passwd\b|shadow\b|ld\.so\.preload\b))
 
   - id: persistence-append
     languages: [bash]
     severity: ERROR
     message: The script installs itself to run again later via a shell rc file, crontab or systemd unit.
-    pattern-regex: (?m)^[^#\n]*?(((>{1,2}|\btee\s+(-a\s+)?)\s*["']?(~|\$HOME|\$\{HOME\})/\.(bashrc|bash_profile|profile|zshrc)\b)|\|\s*crontab\s+-(\s|$)|\bcrontab\s+[^-\s]\S*|(>{1,2}|\btee\s+(-a\s+)?|\b(cp|mv|install)\s+[^;&|\n]*\s)\s*["']?(/etc/cron|/var/spool/cron|/etc/systemd/|/lib/systemd/|/usr/lib/systemd/|(~|\$HOME|\$\{HOME\})/\.config/systemd/))
+    pattern-regex: (?m)^[^#\n]*?(((>{1,2}|\btee[ \t]+(-a[ \t]+)?)[ \t]*["']?(~|\$HOME|\$\{HOME\})/\.(bashrc|bash_profile|profile|zshrc)\b)|\|[ \t]*crontab[ \t]+-([ \t]|$)|\bcrontab[ \t]+[^-\s]\S*|(>{1,2}|\btee[ \t]+(-a[ \t]+)?|\b(cp|mv|install)[ \t]+[^;&|\n]*[ \t])[ \t]*["']?(/etc/cron|/var/spool/cron|/etc/systemd/|/lib/systemd/|/usr/lib/systemd/|(~|\$HOME|\$\{HOME\})/\.config/systemd/))
 
   - id: insecure-permissions
     languages: [bash]
     severity: ERROR
     message: World-writable, setuid/setgid, or root-owned files in a user-writable location let other users escalate privileges.
-    pattern-regex: (?m)^[^#\n]*?(\bchmod\s+(-\S+\s+)*(0?777|[ugoa]*\+[rwxt]*s[rwxt]*|0?[2467][0-7]{3})(\s|$)|\bchown\s+(-\S+\s+)*root\S*\s+(\S+\s+)*["']?(~|\$HOME|\$\{HOME\}|/tmp)(/|\s|["']|$))
+    pattern-regex: (?m)^[^#\n]*?(\bchmod[ \t]+(-\S+[ \t]+)*(0?777|[ugoa]*\+[rwxt]*s[rwxt]*|0?[2467][0-7]{3})([ \t]|$)|\bchown[ \t]+(-\S+[ \t]+)*root\S*[ \t]+(\S+[ \t]+)*["']?(~|\$HOME|\$\{HOME\}|/tmp)(/|[ \t]|["']|$))
 
   - id: rm-rf-variable
     languages: [bash]
     severity: ERROR
     message: rm -rf on a path containing a variable deletes the wrong tree, or /, when the variable is empty or attacker-set.
-    pattern-regex: (?m)^[^#\n]*?\brm(?=(\s+-[\w-]+)*\s+(-[a-zA-Z]*[rR]|--recursive))(?=(\s+-[\w-]+)*\s+(-[a-zA-Z]*f|--force))(\s+-[\w-]+)+\s+[^;&|\n#]*\$
+    pattern-regex: (?m)^[^#\n]*?\brm(?=([ \t]+-[\w-]+)*[ \t]+(-[a-zA-Z]*[rR]|--recursive))(?=([ \t]+-[\w-]+)*[ \t]+(-[a-zA-Z]*f|--force))([ \t]+-[\w-]+)+[ \t]+[^;&|\n#]*\$
 
   - id: disable-security
     languages: [bash]
     severity: ERROR
     message: The script turns off a host security control (SELinux, a firewall, or a security service).
-    pattern-regex: (?m)^[^#\n]*?(\bsetenforce\s+0\b|\bufw\s+disable\b|\bsystemctl\s+(--\S+\s+)*disable\s+(--\S+\s+)*(apparmor|firewalld|ufw|auditd|fail2ban|iptables|nftables|clamav-daemon|clamd|falcon-sensor|osqueryd|wazuh-agent|selinux)\b)
+    pattern-regex: (?m)^[^#\n]*?(\bsetenforce[ \t]+0\b|\bufw[ \t]+disable\b|\bsystemctl[ \t]+(--\S+[ \t]+)*disable[ \t]+(--\S+[ \t]+)*(apparmor|firewalld|ufw|auditd|fail2ban|iptables|nftables|clamav-daemon|clamd|falcon-sensor|osqueryd|wazuh-agent|selinux)\b)
 
   - id: http-download
     languages: [bash]
@@ -85,4 +85,4 @@ rules:
     # Whole-file rule: fires on the first non-comment `chmod` that adds execute,
     # if the script downloads and no non-comment line verifies. Comment lines are
     # ignored so a comment such as "# verified with sha256sum" cannot suppress it.
-    pattern-regex: (?sm)\A(?=.*^[^#\n]*\b(curl|wget)\b)(?!.*^[^#\n]*(\bsha256sum\b|\bshasum\b|\bgpg\b[^#\n]*--verify|\bcosign\b)).*?^[^#\n]*?\K\bchmod\s+(-\S+\s+)*([ugoa]*\+[rwst]*x|0?[0-7]?[0-7]*[1357][0-7]*\b)
+    pattern-regex: (?sm)\A(?=.*^[^#\n]*\b(curl|wget)\b)(?!.*^[^#\n]*(\bsha256sum\b|\bshasum\b|\bgpg\b[^#\n]*--verify|\bcosign\b)).*?^[^#\n]*?\K\bchmod[ \t]+(-\S+[ \t]+)*([ugoa]*\+[rwst]*x|0?[0-7]?[0-7]*[1357][0-7]*\b)
