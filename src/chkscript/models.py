@@ -37,6 +37,9 @@ class ScriptBundle(BaseModel):
 
     file: str = ENTRY_FILE
     text: str
+    # What the Semgrep and regex rules scan: `text` with backslash-newline
+    # continuations joined, line numbers preserved (preprocess.join_continuations).
+    rules_text: str
     numbered: str
     sha256: str
     size: int = Field(ge=0)

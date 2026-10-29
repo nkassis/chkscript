@@ -99,12 +99,9 @@ lines = [1203]
 verdict = "true-positive"
 note = "`eval set -- $(escape \"${INSTALL_K3S_EXEC}\") ...` evaluates environment-supplied text; deliberate and escaped, but exactly what the rule describes."
 
-[[k3s.finding]]
-rule = "insecure-permissions"
-lines = [580]
-engines = ["semgrep"]
-verdict = "noise"
-note = "Wrong span: `chown root:root ${TMP_BIN}` has no $HOME or /tmp path; the Semgrep regex's `(\\S+\\s+)*` runs across newlines to a later /tmp. The regex engine (per line) does not fire."
+# Line 580 (`$SUDO chown root:root ${TMP_BIN}`) used to fire insecure-permissions
+# under Semgrep only: its pattern-regex `(\S+\s+)*` crossed newlines to a later
+# /tmp. NIM-98 confined every pattern-regex to one line, so the engines agree.
 
 [[k3s.finding]]
 rule = "semgrep-parse-error"

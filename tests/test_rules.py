@@ -6,6 +6,7 @@ fires where Semgrep would.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Callable
 from importlib import resources
@@ -16,6 +17,7 @@ from chkscript.models import Finding, ScriptBundle
 from chkscript.preprocess import preprocess
 from chkscript.static import regex_rules, semgrep
 from tests.conftest import require_tool
+from tests.test_rule_spans import CASES as SPAN_CASES
 
 # (rule id, script body, should fire)
 CASES: list[tuple[str, str, bool]] = [
@@ -92,6 +94,12 @@ CASES: list[tuple[str, str, bool]] = [
         False,
     ),
     ("unverified-download", "chmod +x ./build.sh", False),
+    # Backslash continuations: both engines scan joined logical lines.
+    ("rm-rf-variable", 'rm -rf \\\n  "$DIR"', True),
+    ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh \\\n  | sh", True),
+    ("curl-pipe-shell", "cu\\\nrl -fsSL https://x.example/i.sh | sh", True),
+    # A backslash ending a comment does not continue it, so the next line runs.
+    ("rm-rf-variable", '# clean up \\\nrm -rf "$DIR"', True),
 ]
 
 
@@ -113,11 +121,18 @@ def _regex(bundle: ScriptBundle) -> list[Finding]:
     return regex_rules.run(bundle)
 
 
+@functools.cache
+def _semgrep_cached(text: str) -> tuple[bool, tuple[Finding, ...]]:
+    # One Semgrep run per distinct script, shared by test_rule and the parity test.
+    outcome = semgrep.run(preprocess(text.encode()))
+    return outcome.complete, tuple(outcome.findings)
+
+
 def _semgrep(bundle: ScriptBundle) -> list[Finding]:
     require_tool("semgrep")
-    outcome = semgrep.run(bundle)
-    assert outcome.complete, f"Semgrep did not fully parse: {bundle.text!r}"
-    return outcome.findings
+    complete, findings = _semgrep_cached(bundle.text)
+    assert complete, f"Semgrep did not fully parse: {bundle.text!r}"
+    return list(findings)
 
 
 ENGINES: dict[str, Callable[[ScriptBundle], list[Finding]]] = {
@@ -135,6 +150,25 @@ ENGINES: dict[str, Callable[[ScriptBundle], list[Finding]]] = {
 def test_rule(engine: str, rule_id: str, body: str, fires: bool) -> None:
     ids = _rule_ids(ENGINES[engine](_bundle(body)))
     assert (rule_id in ids) is fires
+
+
+PARITY_BODIES = sorted(
+    {body for _, body, _ in CASES} | {body for _, body in SPAN_CASES}
+)
+
+
+@pytest.mark.parametrize("body", PARITY_BODIES, ids=lambda body: repr(body)[:40])
+def test_engines_agree(body: str) -> None:
+    """Semgrep and the regex fallback return the same rule ids on every case.
+
+    test_rule checks each engine only for its target rule; this compares
+    everything either one reports, which is what catches a rule that misfires
+    under one engine only. The two-line span cases are included because the
+    NIM-98 bug (Semgrep regexes matching across lines) shows only when two
+    lines sit next to each other.
+    """
+    bundle = _bundle(body)
+    assert _rule_ids(_semgrep(bundle)) == _rule_ids(_regex(bundle))
 
 
 def test_semgrep_ignores_command_text_inside_strings() -> None:

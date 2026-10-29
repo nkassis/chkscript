@@ -60,6 +60,19 @@ def test_corpus_verdict(
         assert actual == sorted(lines), rule
 
 
+def test_engines_disagree_only_on_semgrep_coverage_notices() -> None:
+    """Every rule fires identically under both engines; only Semgrep's own
+    parse/failure warnings may be engine-specific (NIM-98)."""
+    coverage = {semgrep.PARSE_ERROR_RULE, semgrep.FAILURE_RULE}
+    engine_specific = {
+        (name, entry["rule"])
+        for name, table in EXPECTED.items()
+        for entry in table["finding"]
+        if set(entry.get("engines", ENGINES)) != set(ENGINES)
+    }
+    assert {rule for _, rule in engine_specific} <= coverage, engine_specific
+
+
 def test_every_installer_has_an_expected_entry() -> None:
     scripts = {p.parent.name for p in CORPUS.glob("*/install.sh")}
     assert scripts == set(EXPECTED)

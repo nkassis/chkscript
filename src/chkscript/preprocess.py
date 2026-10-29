@@ -19,6 +19,8 @@ _ASSIGNMENT = re.compile(
     r"([A-Za-z_]\w*)=(\S.*)$"
 )
 _FETCHER = re.compile(r"\b(?:curl|wget|fetch|git\s+clone)\b")
+# A `#` starts a comment at the start of a word; `$#` and URL fragments do not.
+COMMENT = re.compile(r"(?:^|(?<=[ \t]))#.*$")
 
 
 class ScriptTooLargeError(Exception):
@@ -34,6 +36,7 @@ def preprocess(raw: bytes, file: str = ENTRY_FILE) -> ScriptBundle:
     return ScriptBundle(
         file=file,
         text=text,
+        rules_text=join_continuations(text),
         numbered=number_lines(text),
         sha256=hashlib.sha256(raw).hexdigest(),
         size=len(raw),
@@ -43,6 +46,37 @@ def preprocess(raw: bytes, file: str = ENTRY_FILE) -> ScriptBundle:
 
 def normalize(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _continues(line: str) -> bool:
+    # A backslash that ends a comment is part of the comment, as in bash.
+    code = COMMENT.sub("", line)
+    return code.endswith("\\") and not code.endswith("\\\\")
+
+
+def join_continuations(text: str) -> str:
+    """Join backslash-newline continuations onto the line the command starts on.
+
+    Bash removes backslash-newline outright, so the pieces are concatenated with
+    no separator. Each consumed line is left empty, so every line keeps its
+    number and a finding on a joined command reports its first line.
+    """
+    out: list[str] = []
+    pending: list[str] = []
+    for line in text.split("\n"):
+        if _continues(line):
+            pending.append(line[:-1])
+            continue
+        if pending:
+            out.append("".join([*pending, line]))
+            out.extend([""] * len(pending))
+            pending = []
+        else:
+            out.append(line)
+    if pending:
+        out.append("".join(pending))
+        out.extend([""] * (len(pending) - 1))
+    return "\n".join(out)
 
 
 def _lines(text: str) -> list[str]:
