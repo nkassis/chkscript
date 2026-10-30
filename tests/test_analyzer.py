@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 
 import pytest
+from anthropic.types import TextBlock, ThinkingBlock
 from pytest_mock import MockerFixture
 
-from chkscript.analyzer import _parse_response, analyze
+from chkscript.analyzer import AnalysisError, _parse_response, analyze
 from chkscript.models import Severity
 
 
@@ -122,13 +123,14 @@ class TestAnalyze:
         mock_response = mocker.Mock()
         mock_response.content = [
             mocker.Mock(
+                type="text",
                 text=json.dumps(
                     {
                         "summary": "Hello script",
                         "findings": [],
                         "notes": [],
                     }
-                )
+                ),
             )
         ]
         mock_client = mocker.Mock()
@@ -143,17 +145,18 @@ class TestAnalyze:
         good_response = mocker.Mock()
         good_response.content = [
             mocker.Mock(
+                type="text",
                 text=json.dumps(
                     {
                         "summary": "Retry worked",
                         "findings": [],
                         "notes": [],
                     }
-                )
+                ),
             )
         ]
         bad_response = mocker.Mock()
-        bad_response.content = [mocker.Mock(text="not json")]
+        bad_response.content = [mocker.Mock(type="text", text="not json")]
 
         mock_client = mocker.Mock()
         mock_client.messages.create.side_effect = [bad_response, good_response]
@@ -161,4 +164,34 @@ class TestAnalyze:
 
         result = analyze("#!/bin/bash\necho hello")
         assert result.summary == "Retry worked"
+        assert mock_client.messages.create.call_count == 2
+
+    def test_thinking_block_before_text(self, mocker: MockerFixture) -> None:
+        response = mocker.Mock()
+        response.content = [
+            ThinkingBlock(type="thinking", thinking="hmm", signature="sig"),
+            TextBlock(
+                type="text",
+                text=json.dumps({"summary": "After thinking", "findings": []}),
+            ),
+        ]
+        mock_client = mocker.Mock()
+        mock_client.messages.create.return_value = response
+        mocker.patch("chkscript.analyzer.anthropic.Anthropic", return_value=mock_client)
+
+        result = analyze("#!/bin/bash\necho hello")
+        assert result.summary == "After thinking"
+        mock_client.messages.create.assert_called_once()
+
+    def test_no_text_block_retries_then_raises(self, mocker: MockerFixture) -> None:
+        response = mocker.Mock()
+        response.content = [
+            ThinkingBlock(type="thinking", thinking="hmm", signature="sig")
+        ]
+        mock_client = mocker.Mock()
+        mock_client.messages.create.return_value = response
+        mocker.patch("chkscript.analyzer.anthropic.Anthropic", return_value=mock_client)
+
+        with pytest.raises(AnalysisError, match="no text block"):
+            analyze("#!/bin/bash\necho hello")
         assert mock_client.messages.create.call_count == 2
