@@ -31,3 +31,4 @@ One line per deviation from a global default or other design choice, newest last
 - 2026-10-29 — chkscript's coverage notices (shfmt parse failure, LLM layer did not run) are `category: lint` — every finding needs a category, and a notice is neither a capability nor unsafe; the spec did not say (NIM-121).
 - 2026-10-29 — minimum shfmt is v3.5.0 — believed to be the first release with the long `--to-json` flag (earlier releases spell it `-tojson`); unverified, NIM-122 confirms it (NIM-121).
 - 2026-10-29 — a model raise of a capability finding to unsafe with no reason is ignored — the issue requires a reason, and a reasonless raise cannot be shown to the user; the spec did not say what happens without one (NIM-121).
+- 2026-10-29 — README gives no `uv tool` line for shellcheck, only for semgrep — the only `uv tool` route is `shellcheck-py`, a third-party repackaging of the binary, the same supply-chain trust the shfmt entry above declines (NIM-114).
