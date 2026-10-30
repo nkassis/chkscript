@@ -117,6 +117,17 @@ def _run_static(bundle: ScriptBundle) -> StaticResult:
 
 def main() -> None:
     _configure_logging()
+    # An uncaught exception would exit 1, which reads as "warnings only".
+    try:
+        _run()
+    except KeyboardInterrupt:
+        sys.exit(3)
+    except Exception as e:
+        # The type only: an arbitrary message may span lines or echo input.
+        _error(f"Unexpected error ({type(e).__name__})")
+
+
+def _run() -> NoReturn:
     parser = _build_parser()
     args = parser.parse_args()
 
@@ -154,8 +165,6 @@ def main() -> None:
             llm = analyze(bundle.text, model=settings.model)
         except AnalysisError as e:
             _error(str(e))
-        except KeyboardInterrupt:
-            sys.exit(3)
         # The model's findings go on top of the static floor; merge only raises.
         result = llm.model_copy(
             update={
