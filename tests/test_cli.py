@@ -108,6 +108,27 @@ class TestCLI:
             main()
         assert exc_info.value.code == 3
 
+    def test_unknown_flag_exits_3(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr("sys.argv", ["chkscript", "--bogus"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "usage: chkscript" in captured.err
+        assert "--bogus" in captured.err
+
+    def test_help_exits_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr("sys.argv", ["chkscript", "--help"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+        assert "usage: chkscript" in capsys.readouterr().out
+
     def test_json_output(
         self,
         monkeypatch: pytest.MonkeyPatch,
