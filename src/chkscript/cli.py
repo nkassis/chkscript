@@ -22,8 +22,16 @@ from chkscript.static.merge import merge
 logger = logging.getLogger("chkscript")
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error; in chkscript 2 means unsafe."""
+
+    def error(self, message: str) -> NoReturn:
+        logger.error("%s", self.format_usage().rstrip())
+        _error(message)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="chkscript",
         description="Analyze shell scripts for safety issues",
     )
@@ -108,9 +116,9 @@ def _run_static(bundle: ScriptBundle) -> StaticResult:
 
 
 def main() -> None:
+    _configure_logging()
     parser = _build_parser()
     args = parser.parse_args()
-    _configure_logging()
 
     try:
         settings = load_config(model=args.model)
