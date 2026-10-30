@@ -40,7 +40,10 @@ class TestFormatTerminal:
         output = format_terminal(_safe_result())
         assert "Summary" in output
         assert "Simple echo script" in output
-        assert "No issues" in output
+        assert "No issues" not in output
+
+    def test_notes_shown_with_verbose(self) -> None:
+        assert "No issues" in format_terminal(_safe_result(), verbose=True)
 
     def test_unsafe_output(self) -> None:
         output = format_terminal(_unsafe_result())

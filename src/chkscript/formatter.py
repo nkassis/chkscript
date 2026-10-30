@@ -36,8 +36,8 @@ def format_terminal(result: AnalysisResult, verbose: bool = False) -> str:
     for finding in result.findings:
         _format_finding(lines, finding, verbose)
 
-    # Notes
-    if result.notes:
+    # Notes: the model's code-quality observations, not findings; -v only.
+    if verbose and result.notes:
         lines.append(_c(_DIM, "-- Notes --"))
         for note in result.notes:
             lines.append(_c(_DIM, f"- {note}"))
