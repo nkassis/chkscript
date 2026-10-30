@@ -1,4 +1,4 @@
-"""Settings resolution: flag, then CHKSCRIPT_*, then provider env, then default.
+"""Settings resolution: flag, then CHKSCRIPT_*, then provider env, then auto-detect.
 
 Secrets are never stored on Settings. Provider keys stay in the environment,
 where the SDKs read them; `apply_secret_files` only turns `*_API_KEY_FILE` into
@@ -8,17 +8,23 @@ where the SDKs read them; `apply_secret_files` only turns `*_API_KEY_FILE` into
 from __future__ import annotations
 
 import os
-from collections.abc import MutableMapping
+import urllib.error
+import urllib.request
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Default models. Hosted is the Anthropic model the v0.1 analyzer calls; local is
-# the Ollama selector used when no provider variable is set (wired in phase 3).
-DEFAULT_HOSTED_MODEL = "claude-sonnet-5-5"
+# Default models, in pydantic-ai's provider:model form. Hosted is used when
+# ANTHROPIC_API_KEY is set; local when Ollama answers on its base URL.
+DEFAULT_HOSTED_MODEL = "anthropic:claude-sonnet-5-5"
 DEFAULT_LOCAL_MODEL = "ollama:gpt-oss:20b"
+
+OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
+_OLLAMA_PROBE_TIMEOUT_SECONDS = 0.5
 
 ENV_PREFIX = "CHKSCRIPT_"
 
@@ -30,6 +36,11 @@ _PROVIDER_DEFAULT_MODELS: tuple[tuple[str, str], ...] = (
     ("ANTHROPIC_API_KEY", DEFAULT_HOSTED_MODEL),
 )
 
+NO_MODEL_NOTICE = (
+    "No model available; running static analysis only. Set ANTHROPIC_API_KEY, "
+    f"or start Ollama ({DEFAULT_OLLAMA_BASE_URL}), to enable the LLM layer."
+)
+
 FailOn = Literal["warning", "unsafe"]
 
 
@@ -37,17 +48,11 @@ class ConfigError(Exception):
     """Invalid configuration. Messages name variables and paths, never values."""
 
 
-def _provider_default_model() -> str:
-    for variable, model in _PROVIDER_DEFAULT_MODELS:
-        if os.environ.get(variable):
-            return model
-    return DEFAULT_LOCAL_MODEL
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix=ENV_PREFIX, extra="ignore")
 
-    model: str = Field(default_factory=_provider_default_model, min_length=1)
+    # Flag or CHKSCRIPT_MODEL only; None means auto-detect (`resolve_model`).
+    model: str | None = Field(default=None, min_length=1)
     depth: int = Field(default=2, ge=0, le=4)
     max_fetches: int = Field(default=5, ge=0)
     fail_on: FailOn = "warning"
@@ -98,3 +103,41 @@ def load_config(model: str | None = None) -> Settings:
         return Settings(**overrides)
     except ValidationError as e:
         raise ConfigError(_describe(e)) from None
+
+
+def ollama_base_url() -> str:
+    return os.environ.get(OLLAMA_BASE_URL_ENV) or DEFAULT_OLLAMA_BASE_URL
+
+
+def ollama_reachable() -> bool:
+    """True when Ollama answers its model listing within a short timeout."""
+    root = ollama_base_url().rstrip("/").removesuffix("/v1")
+    try:
+        with urllib.request.urlopen(
+            f"{root}/api/tags", timeout=_OLLAMA_PROBE_TIMEOUT_SECONDS
+        ) as response:
+            return bool(response.status == 200)
+    except (OSError, ValueError):  # URLError and timeouts are OSErrors
+        return False
+
+
+def resolve_model(
+    settings: Settings, probe: Callable[[], bool] | None = None
+) -> str | None:
+    """Pick the model: flag or env, provider key, local Ollama, else None.
+
+    None means no model is available and the run is static-only. When the result
+    is an Ollama model, OLLAMA_BASE_URL is set to its default if unset, because
+    pydantic-ai's Ollama provider requires it.
+    """
+    model = settings.model
+    if model is None:
+        model = next(
+            (m for variable, m in _PROVIDER_DEFAULT_MODELS if os.environ.get(variable)),
+            None,
+        )
+    if model is None and (probe or ollama_reachable)():
+        model = DEFAULT_LOCAL_MODEL
+    if model is not None and model.startswith("ollama:"):
+        os.environ[OLLAMA_BASE_URL_ENV] = ollama_base_url()
+    return model
