@@ -84,6 +84,7 @@ def format_json(result: AnalysisResult) -> str:
         "findings": [
             {
                 "severity": finding.severity.name.lower(),
+                "category": finding.category,
                 "source": finding.source,
                 "rule_id": finding.rule_id,
                 "file": finding.file,

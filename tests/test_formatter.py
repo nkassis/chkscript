@@ -150,6 +150,7 @@ class TestSourceAttribution:
         data = json.loads(format_json(_static_result()))
         finding = data["findings"][0]
         assert finding["source"] == "semgrep"
+        assert finding["category"] == "unsafe"
         assert finding["rule_id"] == "curl-pipe-shell"
         assert finding["file"] == "<entry>"
         assert finding["line"] == 4

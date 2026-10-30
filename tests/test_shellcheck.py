@@ -47,6 +47,7 @@ def test_every_finding_is_a_warning_with_sc_code_and_line() -> None:
     assert [(f.rule_id, f.line) for f in findings] == [("SC2086", 2), ("SC2045", 3)]
     assert all(f.severity == Severity.WARNING for f in findings)
     assert all(f.source == "shellcheck" for f in findings)
+    assert all(f.category == "lint" for f in findings)
     assert findings[0].snippet == "echo $x"
 
 
