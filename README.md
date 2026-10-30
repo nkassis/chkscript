@@ -15,27 +15,46 @@ uv tool install .
 chkscript install.sh
 
 # Pipe from curl
-curl -fsSL https://example.com/install.sh | chkscript
+curl -fsSL https://sh.rustup.rs | chkscript
+
+# Pick the model
+chkscript --model claude-haiku-5-5 install.sh
 
 # JSON output
-chkscript --json script.sh | jq '.findings[] | select(.severity == "unsafe")'
+chkscript --json install.sh | jq '.findings[] | select(.severity == "unsafe")'
 
 # Verbose mode (show all code snippets)
-chkscript -v script.sh
+chkscript -v install.sh
 
 # Static rules only: no model, no API key
-chkscript --static-only script.sh
+chkscript --static-only install.sh
 ```
 
 ## Setup
 
-`shellcheck` and `semgrep` on `PATH` are recommended (`sudo apt install shellcheck`, `uv tool install semgrep`). Without them chkscript falls back to its built-in regex rules and says so on stderr.
+`shellcheck` and `semgrep` on `PATH` are recommended. Without them chkscript falls back to its built-in regex rules and says so on stderr.
 
-The default mode also requires an Anthropic API key (`--static-only` does not):
+| Platform | shellcheck | semgrep |
+|----------|------------|---------|
+| Debian / Ubuntu | `sudo apt install shellcheck` | `uv tool install semgrep` |
+| Arch | `sudo pacman -S shellcheck` | `uv tool install semgrep` |
+| macOS | `brew install shellcheck` | `brew install semgrep` |
+
+The default mode also requires an Anthropic API key (`--static-only` does not). Give it directly, or as a file:
 
 ```bash
 export ANTHROPIC_API_KEY='your-key-here'
+# or
+export ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key
 ```
+
+Choose the model with `CHKSCRIPT_MODEL`:
+
+```bash
+export CHKSCRIPT_MODEL=claude-haiku-5-5
+```
+
+The model is `--model`, then `CHKSCRIPT_MODEL`, then the provider's default (`claude-sonnet-5-5` when an Anthropic key is set), then the local default `ollama:gpt-oss:20b`. The Ollama provider isn't wired up yet, so for now the default mode needs an Anthropic key. `.env.example` lists every variable.
 
 ## Exit Codes
 
