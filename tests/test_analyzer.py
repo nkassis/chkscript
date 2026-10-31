@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     FinishReason,
     ModelMessage,
@@ -33,6 +34,8 @@ from chkscript.models import Finding, LLMFinding, LLMResult, ScriptBundle, Sever
 from chkscript.preprocess import preprocess
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+FAKE_KEY = "sk-ant-fake-0123456789"
 
 SCRIPT = b"""#!/bin/bash
 set -euo pipefail
@@ -193,16 +196,37 @@ class TestAnalyze:
         with pytest.raises(AnalysisError, match="truncated"):
             LLMAnalyzer(FunctionModel(fn)).analyze(_bundle(), [])
 
-    def test_provider_failure_raises_analysis_error(self) -> None:
+    def test_provider_failure_names_the_type_not_the_text(self) -> None:
         def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            raise ConnectionError("connection refused")
+            raise ConnectionError(f"refused, key={FAKE_KEY}")
 
-        with pytest.raises(AnalysisError, match="connection refused"):
+        with pytest.raises(AnalysisError) as exc_info:
             LLMAnalyzer(FunctionModel(fn)).analyze(_bundle(), [])
+        assert str(exc_info.value) == "model call failed: ConnectionError"
+
+    def test_http_failure_keeps_the_status_code(self) -> None:
+        def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise ModelHTTPError(401, "m", body={"error": f"bad key {FAKE_KEY}"})
+
+        with pytest.raises(AnalysisError) as exc_info:
+            LLMAnalyzer(FunctionModel(fn)).analyze(_bundle(), [])
+        assert str(exc_info.value) == "model call failed: ModelHTTPError, HTTP 401"
 
     def test_unknown_model_raises_analysis_error(self) -> None:
         with pytest.raises(AnalysisError):
             LLMAnalyzer("no-such-provider:model")
+
+    def test_setup_failure_names_the_type_not_the_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def infer(_model: str) -> None:
+            raise ValueError(f"invalid key {FAKE_KEY}")
+
+        monkeypatch.setattr(analyzer, "infer_model", infer)
+        with pytest.raises(AnalysisError) as exc_info:
+            LLMAnalyzer("anthropic:m")
+        assert FAKE_KEY not in str(exc_info.value)
+        assert "ValueError" in str(exc_info.value)
 
 
 class TestDelimiter:

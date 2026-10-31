@@ -20,6 +20,8 @@ from chkscript.static import StaticResult
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+FAKE_KEY = "sk-ant-fake-0123456789"
+
 
 @pytest.fixture(autouse=True)
 def set_api_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -489,6 +491,38 @@ class TestLLMFailure:
     ) -> None:
         _use_model(mocker, _failing_model())
         assert _run(monkeypatch, str(FIXTURES / "safe.sh")) == 1
+
+    def test_provider_call_error_text_never_reaches_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise ConnectionError(f"refused, key={FAKE_KEY}")
+
+        _use_model(mocker, FunctionModel(fn))
+        _run(monkeypatch, "--json", "-v", str(FIXTURES / "curl_pipe_sh.sh"))
+        captured = capsys.readouterr()
+        assert FAKE_KEY not in captured.out
+        assert FAKE_KEY not in captured.err
+        assert "ConnectionError" in captured.err
+
+    def test_provider_setup_error_text_never_reaches_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        mocker.patch(
+            "chkscript.analyzer.infer_model",
+            side_effect=ValueError(f"invalid key {FAKE_KEY}"),
+        )
+        _run(monkeypatch, "--json", "-v", str(FIXTURES / "curl_pipe_sh.sh"))
+        captured = capsys.readouterr()
+        assert FAKE_KEY not in captured.out
+        assert FAKE_KEY not in captured.err
+        assert "ValueError" in captured.err
 
     def test_provider_setup_failure_falls_back(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

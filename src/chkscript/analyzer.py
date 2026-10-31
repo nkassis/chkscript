@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from urllib.parse import urlparse
 
 from pydantic_ai import Agent, NativeOutput, ToolOutput, capture_run_messages
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, infer_model
 from pydantic_ai.settings import ModelSettings
@@ -80,7 +81,10 @@ and anything that looks like a closing tag."""
 
 
 class AnalysisError(Exception):
-    """The LLM layer did not produce a usable result."""
+    """The LLM layer did not produce a usable result.
+
+    The message is shown to the user, so it never carries provider error text.
+    """
 
 
 class FloorViolationError(Exception):
@@ -125,6 +129,14 @@ def build_prompt(bundle: ScriptBundle, static: list[Finding], tag: str) -> str:
     )
 
 
+def _failure_reason(e: Exception) -> str:
+    """A fixed description of a failure: provider error text can echo request
+    details or credentials, so it never reaches output."""
+    if isinstance(e, ModelHTTPError):
+        return f"model call failed: {type(e).__name__}, HTTP {e.status_code}"
+    return f"model call failed: {type(e).__name__}"
+
+
 def _truncated(messages: list[ModelMessage]) -> bool:
     return any(
         isinstance(m, ModelResponse) and m.finish_reason == "length" for m in messages
@@ -138,7 +150,9 @@ class LLMAnalyzer:
         try:
             self._model = infer_model(model) if isinstance(model, str) else model
         except Exception as e:  # any provider setup failure: unknown name, no key
-            raise AnalysisError(f"cannot use model {model!r}: {e}") from e
+            raise AnalysisError(
+                f"cannot use model {model!r}: {type(e).__name__}"
+            ) from e
 
     @property
     def endpoint_host(self) -> str | None:
@@ -170,7 +184,7 @@ class LLMAnalyzer:
             except Exception as e:  # provider, network, or unusable output
                 if _truncated(messages):
                     raise AnalysisError("model response was truncated") from e
-                raise AnalysisError(f"{type(e).__name__}: {e}") from e
+                raise AnalysisError(_failure_reason(e)) from e
         if _truncated(result.all_messages()):
             raise AnalysisError("model response was truncated")
         return result.output
