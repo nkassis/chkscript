@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
-import os
 import sys
 from typing import NoReturn
 
-from chkscript.analyzer import AnalysisError, analyze
+from chkscript.analyzer import (
+    AnalysisError,
+    FloorViolationError,
+    LLMAnalyzer,
+    merge_llm,
+)
 from chkscript.config import (
     DEFAULT_HOSTED_MODEL,
     DEFAULT_LOCAL_MODEL,
+    NO_MODEL_NOTICE,
     ConfigError,
     load_config,
+    resolve_model,
 )
 from chkscript.formatter import format_json, format_terminal
-from chkscript.models import AnalysisResult, ScriptBundle
+from chkscript.models import AnalysisResult, Finding, ScriptBundle, Severity
 from chkscript.preprocess import ScriptTooLargeError, preprocess
 from chkscript.static import StaticResult, run_static
-from chkscript.static.merge import merge
 
 logger = logging.getLogger("chkscript")
 
@@ -62,9 +68,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help=(
-            "Model to use (default: $CHKSCRIPT_MODEL, else "
-            f"{DEFAULT_HOSTED_MODEL} when ANTHROPIC_API_KEY is set, "
-            f"else {DEFAULT_LOCAL_MODEL})"
+            "provider:model selector (default: $CHKSCRIPT_MODEL, else "
+            f"{DEFAULT_HOSTED_MODEL} when ANTHROPIC_API_KEY is set, else "
+            f"{DEFAULT_LOCAL_MODEL} when Ollama answers, else static only)"
         ),
     )
     return parser
@@ -115,6 +121,65 @@ def _run_static(bundle: ScriptBundle) -> StaticResult:
     return static
 
 
+def _static_report(static: StaticResult, extra: list[Finding]) -> AnalysisResult:
+    return AnalysisResult(
+        summary="Static analysis only.",
+        findings=[*static.findings, *extra],
+        mode="static-only",
+        static_tools=static.tools,
+    )
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _announce_endpoint(analyzer: LLMAnalyzer) -> None:
+    host = analyzer.endpoint_host
+    if host is not None and not _is_loopback(host):
+        logger.info("Script contents will be sent to %s for analysis.", host)
+
+
+def _llm_not_run(static: StaticResult, reason: str) -> AnalysisResult:
+    logger.warning("Warning: the LLM layer did not run (%s).", reason)
+    notice = Finding(
+        severity=Severity.WARNING,
+        category="lint",
+        description=(
+            f"The LLM layer did not run ({reason}); this report is static "
+            "analysis only."
+        ),
+        source="chkscript",
+        rule_id="llm-not-run",
+    )
+    return _static_report(static, [notice])
+
+
+def _run_llm(bundle: ScriptBundle, static: StaticResult, model: str) -> AnalysisResult:
+    try:
+        analyzer = LLMAnalyzer(model)
+        _announce_endpoint(analyzer)
+        llm = analyzer.analyze(bundle, static.findings)
+    except AnalysisError as e:
+        return _llm_not_run(static, str(e))
+    try:
+        findings = merge_llm(static.findings, llm, bundle)
+    except FloorViolationError as e:
+        _error(f"internal error, refusing to report: {e}")
+    return AnalysisResult(
+        summary=llm.summary,
+        findings=findings,
+        notes=llm.notes,
+        mode="full",
+        static_tools=static.tools,
+    )
+
+
 def main() -> None:
     _configure_logging()
     # An uncaught exception would exit 1, which reads as "warnings only".
@@ -136,11 +201,6 @@ def _run() -> NoReturn:
     except ConfigError as e:
         _error(str(e))
 
-    if not args.static_only and not os.environ.get("ANTHROPIC_API_KEY"):
-        _error(
-            "ANTHROPIC_API_KEY not set.\n" "  export ANTHROPIC_API_KEY='your-key-here'"
-        )
-
     raw = _read_script(args.file)
 
     if not raw.strip():
@@ -153,26 +213,13 @@ def _run() -> NoReturn:
 
     static = _run_static(bundle)
 
-    if args.static_only:
-        result = AnalysisResult(
-            summary="Static analysis only.",
-            findings=static.findings,
-            mode="static-only",
-            static_tools=static.tools,
-        )
+    model = None if args.static_only else resolve_model(settings)
+    if model is None:
+        if not args.static_only:
+            logger.info("Notice: %s", NO_MODEL_NOTICE)
+        result = _static_report(static, [])
     else:
-        try:
-            llm = analyze(bundle.text, model=settings.model)
-        except AnalysisError as e:
-            _error(str(e))
-        # The model's findings go on top of the static floor; merge only raises.
-        result = llm.model_copy(
-            update={
-                "findings": merge([*static.findings, *llm.findings]),
-                "mode": "full",
-                "static_tools": static.tools,
-            }
-        )
+        result = _run_llm(bundle, static, model)
 
     if args.json_output:
         print(format_json(result))

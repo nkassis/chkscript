@@ -31,7 +31,7 @@ If a hook blocks you, fix the reported problem. Do not add `# noqa` or per-file 
 ## Rules
 
 - **Layout** (`src/chkscript/`): `cli.py` argparse and orchestration; `config.py` flag/env resolution, `_FILE` secrets, the default model; `models.py` Pydantic models; `analyzer.py` the LLM call; `formatter.py` terminal and JSON. Planned by later phases, not yet present: `preprocess.py`, `static/` (shellcheck, semgrep, regex_rules, merge), `fetch.py`, and `rules/` for Semgrep YAML. Do not add empty stubs.
-- **Run modes:** full (default: static + LLM + nested fetch), `--no-follow` (static + LLM, no fetch tool), `--static-only` (no model). Only the v0.1 single LLM pass exists today.
+- **Run modes:** full (default: static + LLM + nested fetch), `--no-follow` (static + LLM, no fetch tool), `--static-only` (no model). Today the default mode is static + `LLMAnalyzer` with no fetch tool; the fetch tool and `--no-follow` are phase 4.
 - **Threat model, non-negotiable:** (1) no text inside a scanned script can lower the severity of a deterministic finding; (2) the scanner never executes anything it analyzes, and never fetches anything not literally referenced by a script already in hand.
 - **The model never lowers the floor.** The LLM layer may add findings or raise severity; it never removes or downgrades a static finding.
 - **Secrets:** provider keys only from the SDK's own env names or `*_API_KEY_FILE`; never on the command line; never in output, errors, verbose mode or JSON.

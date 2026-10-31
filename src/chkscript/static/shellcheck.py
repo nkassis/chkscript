@@ -59,6 +59,7 @@ def parse_output(output: str, bundle: ScriptBundle) -> list[Finding]:
         findings.append(
             Finding(
                 severity=Severity.WARNING,
+                category="lint",
                 description=comment["message"],
                 snippet=bundle.line_text(line),
                 source="shellcheck",
