@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     UserPromptPart,
 )
@@ -179,6 +180,15 @@ class TestAnalyze:
             "curl-pipe-shell",
             "unverified-download",
         ]
+
+    def test_thinking_part_before_output(self) -> None:
+        # NIM-138: models may emit a thinking block before the answer.
+        def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            answer = _respond({**EMPTY, "summary": "after thinking"}, info)
+            return ModelResponse(parts=[ThinkingPart("hmm"), *answer.parts])
+
+        result = LLMAnalyzer(FunctionModel(fn)).analyze(_bundle(), [])
+        assert result.summary == "after thinking"
 
     def test_truncated_response_raises(self) -> None:
         def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

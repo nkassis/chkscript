@@ -28,8 +28,16 @@ from chkscript.static import StaticResult, run_static
 logger = logging.getLogger("chkscript")
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error; in chkscript 2 means unsafe."""
+
+    def error(self, message: str) -> NoReturn:
+        logger.error("%s", self.format_usage().rstrip())
+        _error(message)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="chkscript",
         description="Analyze shell scripts for safety issues",
     )
@@ -173,9 +181,20 @@ def _run_llm(bundle: ScriptBundle, static: StaticResult, model: str) -> Analysis
 
 
 def main() -> None:
+    _configure_logging()
+    # An uncaught exception would exit 1, which reads as "warnings only".
+    try:
+        _run()
+    except KeyboardInterrupt:
+        sys.exit(3)
+    except Exception as e:
+        # The type only: an arbitrary message may span lines or echo input.
+        _error(f"Unexpected error ({type(e).__name__})")
+
+
+def _run() -> NoReturn:
     parser = _build_parser()
     args = parser.parse_args()
-    _configure_logging()
 
     try:
         settings = load_config(model=args.model)
@@ -200,10 +219,7 @@ def main() -> None:
             logger.info("Notice: %s", NO_MODEL_NOTICE)
         result = _static_report(static, [])
     else:
-        try:
-            result = _run_llm(bundle, static, model)
-        except KeyboardInterrupt:
-            sys.exit(3)
+        result = _run_llm(bundle, static, model)
 
     if args.json_output:
         print(format_json(result))

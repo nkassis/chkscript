@@ -160,6 +160,27 @@ class TestCLI:
             main()
         assert exc_info.value.code == 3
 
+    def test_unknown_flag_exits_3(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr("sys.argv", ["chkscript", "--bogus"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "usage: chkscript" in captured.err
+        assert "--bogus" in captured.err
+
+    def test_help_exits_0(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr("sys.argv", ["chkscript", "--help"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+        assert "usage: chkscript" in capsys.readouterr().out
+
     def test_json_output(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -232,6 +253,41 @@ class TestCLI:
     def test_invalid_config_exits_3(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CHKSCRIPT_FAIL_ON", "critical")
         monkeypatch.setattr("sys.argv", ["chkscript", str(FIXTURES / "safe_script.sh")])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 3
+
+    @pytest.mark.parametrize(
+        "target", ["chkscript.cli.run_static", "chkscript.cli.merge_llm"]
+    )
+    def test_unexpected_exception_exits_3_with_one_line(
+        self,
+        target: str,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Uncaught, Python would exit 1, which means "warnings only".
+        monkeypatch.setattr("sys.argv", ["chkscript", str(FIXTURES / "safe_script.sh")])
+        _fake_llm(mocker)
+        mocker.patch(target, side_effect=AttributeError("secret-ish detail"))
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        # The static layer's progress line precedes it; the error is one line.
+        errors = [line for line in captured.err.splitlines() if "Error" in line]
+        assert errors == ["Error: Unexpected error (AttributeError)"]
+        assert captured.err.endswith("Error: Unexpected error (AttributeError)\n")
+        assert "Traceback" not in captured.err
+        assert "secret-ish detail" not in captured.err
+
+    def test_keyboard_interrupt_exits_3(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        monkeypatch.setattr("sys.argv", ["chkscript", str(FIXTURES / "safe_script.sh")])
+        mocker.patch("chkscript.cli.LLMAnalyzer", side_effect=KeyboardInterrupt)
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code == 3
