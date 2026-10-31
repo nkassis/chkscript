@@ -48,6 +48,14 @@ class AnalysisError(Exception):
     pass
 
 
+def _first_text(response: anthropic.types.Message) -> str:
+    # The model may put a thinking block before the text, so content[0] is not it.
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    raise IndexError("response has no text block")
+
+
 def analyze(script: str, model: str = DEFAULT_HOSTED_MODEL) -> AnalysisResult:
     client = anthropic.Anthropic()
 
@@ -62,9 +70,9 @@ def analyze(script: str, model: str = DEFAULT_HOSTED_MODEL) -> AnalysisResult:
                     {"role": "user", "content": f"<script>\n{script}\n</script>"}
                 ],
             )
-            text = response.content[0].text
+            text = _first_text(response)
             return _parse_response(text)
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
+        except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
             last_error = e
             continue
         except anthropic.APIError as e:
