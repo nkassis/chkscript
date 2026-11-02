@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import urllib.error
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pytest_mock import MockerFixture
 
 from chkscript import config
 from chkscript.cli import main
@@ -16,6 +18,7 @@ from chkscript.config import (
     Settings,
     apply_secret_files,
     load_config,
+    resolve_model,
 )
 
 FIXTURE_KEY = "sk-ant-fixture-0123456789-DO-NOT-LEAK"
@@ -41,7 +44,7 @@ def _key_file(tmp_path: Path, content: str) -> Path:
 class TestDefaults:
     def test_defaults_when_nothing_is_set(self) -> None:
         settings = load_config()
-        assert settings.model == DEFAULT_LOCAL_MODEL
+        assert settings.model is None
         assert settings.depth == 2
         assert settings.max_fetches == 5
         assert settings.fail_on == "warning"
@@ -62,7 +65,11 @@ class TestDefaults:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)
-        assert Settings().model == DEFAULT_HOSTED_MODEL
+        assert resolve_model(Settings(), probe=lambda: True) == DEFAULT_HOSTED_MODEL
+
+    def test_defaults_use_provider_prefix(self) -> None:
+        assert DEFAULT_HOSTED_MODEL == "anthropic:claude-sonnet-5-5"
+        assert DEFAULT_LOCAL_MODEL == "ollama:gpt-oss:20b"
 
 
 class TestPrecedence:
@@ -75,24 +82,85 @@ class TestPrecedence:
             (("ANTHROPIC_API_KEY", "provider-model"),),
         )
 
-    def test_default_when_no_provider_env(self) -> None:
-        assert load_config().model == DEFAULT_LOCAL_MODEL
+    @staticmethod
+    def _resolve(model: str | None = None, ollama: bool = True) -> str | None:
+        return resolve_model(load_config(model=model), probe=lambda: ollama)
 
-    def test_provider_env_beats_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_nothing_available_is_static_only(self) -> None:
+        assert self._resolve(ollama=False) is None
+
+    def test_ollama_when_no_provider_env(self) -> None:
+        assert self._resolve() == DEFAULT_LOCAL_MODEL
+
+    def test_provider_env_beats_ollama(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)
-        assert load_config().model == "provider-model"
+        assert self._resolve() == "provider-model"
+
+    def test_provider_env_does_not_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)
+
+        def probe() -> bool:
+            raise AssertionError("probed Ollama")
+
+        assert resolve_model(load_config(), probe=probe) == "provider-model"
 
     def test_chkscript_env_beats_provider_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)
         monkeypatch.setenv("CHKSCRIPT_MODEL", "env-model")
-        assert load_config().model == "env-model"
+        assert self._resolve() == "env-model"
 
     def test_flag_beats_chkscript_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", FIXTURE_KEY)
         monkeypatch.setenv("CHKSCRIPT_MODEL", "env-model")
-        assert load_config(model="flag-model").model == "flag-model"
+        assert self._resolve(model="flag-model") == "flag-model"
+
+
+class TestOllama:
+    @pytest.fixture(autouse=True)
+    def clean_ollama_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+
+    def test_base_url_default_exported_for_ollama_model(self) -> None:
+        resolve_model(load_config(model="ollama:llama3"))
+        assert os.environ["OLLAMA_BASE_URL"] == "http://localhost:11434/v1"
+
+    def test_base_url_kept_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://gpu-box:11434/v1")
+        resolve_model(load_config(model="ollama:llama3"))
+        assert os.environ["OLLAMA_BASE_URL"] == "http://gpu-box:11434/v1"
+
+    def test_base_url_not_exported_for_other_providers(self) -> None:
+        resolve_model(load_config(model="anthropic:claude-sonnet-5-5"))
+        assert "OLLAMA_BASE_URL" not in os.environ
+
+    def test_probe_hits_api_tags_under_base_url_root(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:9/v1")
+        urlopen = mocker.patch("chkscript.config.urllib.request.urlopen")
+        urlopen.return_value.__enter__.return_value.status = 200
+        assert config.ollama_reachable() is True
+        url = urlopen.call_args.args[0]
+        assert url == "http://127.0.0.1:9/api/tags"
+        assert urlopen.call_args.kwargs["timeout"] <= 1
+
+    def test_probe_false_when_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        mocker.patch(
+            "chkscript.config.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("refused"),
+        )
+        assert config.ollama_reachable() is False
+
+    def test_probe_false_on_real_closed_port(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Port 9 (discard) is closed on any normal machine: connection refused.
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:9/v1")
+        assert config.ollama_reachable() is False
 
 
 class TestValidation:

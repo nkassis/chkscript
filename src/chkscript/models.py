@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Severity(IntEnum):
@@ -15,6 +15,10 @@ class Severity(IntEnum):
 Source = Literal["shellcheck", "semgrep", "regex", "llm", "chkscript"]
 StaticTool = Literal["shellcheck", "semgrep", "regex"]
 Mode = Literal["full", "no-follow", "static-only"]
+# lint: shellcheck output; capability: powerful but normal for an installer;
+# unsafe: never legitimate in an installer (the floor). See docs/spec.md.
+Category = Literal["lint", "capability", "unsafe"]
+CATEGORY_RANK: dict[Category, int] = {"lint": 0, "capability": 1, "unsafe": 2}
 
 ENTRY_FILE = "<entry>"
 
@@ -56,6 +60,7 @@ class Finding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     severity: Severity
+    category: Category
     description: str
     # v0.1 free-text location from the model, e.g. "line 3"; superseded by `line`.
     line_reference: str | None = None
@@ -65,6 +70,56 @@ class Finding(BaseModel):
     file: str = ENTRY_FILE
     line: int | None = None
     merged_from: list[Source] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_category(cls, data: object) -> object:
+        # Unset category follows severity, so findings built before categories
+        # existed keep working: unsafe stays unsafe, anything else is a capability.
+        if isinstance(data, dict) and data.get("category") is None:
+            unsafe = data.get("severity") == Severity.UNSAFE
+            data = {**data, "category": "unsafe" if unsafe else "capability"}
+        return data
+
+
+class LLMFinding(BaseModel):
+    """A finding as the model reports it; the analyzer turns it into a `Finding`.
+
+    Only what the model may say: source, file and severity are set by chkscript.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: Literal["capability", "unsafe"] = Field(
+        description="capability or unsafe, as defined in the instructions"
+    )
+    rule_id: str | None = Field(
+        default=None,
+        description=(
+            "The rule_id of the static finding this raises, or a short kebab-case "
+            "id of your own for a new finding"
+        ),
+    )
+    line: int | None = Field(
+        default=None, description="Line number copied from the numbered script"
+    )
+    description: str = Field(
+        description="What the script does and, for a raise, the evidence for it"
+    )
+    snippet: str | None = Field(default=None, description="The relevant code")
+
+
+class LLMResult(BaseModel):
+    """The model's structured output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(description="What the script does, in two or three lines")
+    findings: list[LLMFinding] = Field(default_factory=list)
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Code-quality observations that are not safety findings",
+    )
 
 
 class FetchRecord(BaseModel):
