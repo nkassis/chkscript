@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chkscript import redact
 from chkscript.models import Finding, ScriptBundle, StaticTool
 from chkscript.static import regex_rules, semgrep, shellcheck
 from chkscript.static.merge import merge
@@ -48,6 +49,9 @@ def run_static(bundle: ScriptBundle) -> StaticResult:
         tools.append("regex")
     if tools == ["regex"]:
         notices.append("Only the regex rules ran (no shellcheck, no semgrep).")
+
+    # Not a rule over commands: detected in preprocessing, so every mode has it.
+    findings += redact.secret_findings(bundle)
 
     ordered = sorted(findings, key=lambda f: (f.line is None, f.line or 0))
     return StaticResult(findings=merge(ordered), tools=tools, notices=notices)

@@ -1,4 +1,5 @@
-"""Turn raw script bytes into a ScriptBundle: decoded, numbered, hashed, URLs found."""
+"""Turn raw script bytes into a ScriptBundle: decoded, numbered, hashed, URLs and
+hardcoded secrets found."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import re
 from typing import Literal
 
 from chkscript.models import ENTRY_FILE, ExtractedUrl, ScriptBundle
+from chkscript.redact import detect, mask
 
 MAX_SCRIPT_SIZE = 500 * 1024  # 500KB
 
@@ -33,14 +35,17 @@ def preprocess(raw: bytes, file: str = ENTRY_FILE) -> ScriptBundle:
             f"Script exceeds maximum size of {MAX_SCRIPT_SIZE // 1024}KB"
         )
     text = normalize(raw.decode("utf-8", errors="replace"))
+    secrets = detect(text)
     return ScriptBundle(
         file=file,
         text=text,
         rules_text=join_continuations(text),
         numbered=number_lines(text),
+        masked_numbered=number_lines(mask(text, secrets)),
         sha256=hashlib.sha256(raw).hexdigest(),
         size=len(raw),
         urls=extract_urls(text),
+        secrets=secrets,
     )
 
 
