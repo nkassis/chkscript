@@ -588,3 +588,95 @@ class TestLLMFailure:
         )
         assert code == 1
         assert "LLM layer did not run" in capsys.readouterr().err
+
+
+GITHUB_TOKEN = "ghp_FAKEfakeFAKEfake0123456789abcdefABCD"
+SECRET_NOTICE = "looks like a live credential"
+
+
+class TestHardcodedSecret:
+    def test_static_only_exit_1_with_masked_finding_and_one_notice(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fixture = str(FIXTURES / "hardcoded_token.sh")
+        assert _run(monkeypatch, "--static-only", "-v", fixture) == 1
+        captured = capsys.readouterr()
+        assert captured.err.count(SECRET_NOTICE) == 1
+        assert "(github-token)" in captured.err
+        assert "hardcoded-secret" in captured.out
+        assert 'GITHUB_TOKEN="[SECRET-1:github-token]"' in captured.out
+        assert GITHUB_TOKEN not in captured.out + captured.err
+
+    def test_two_secrets_still_one_notice(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fixture = str(FIXTURES / "hardcoded_two_secrets.sh")
+        assert _run(monkeypatch, "--static-only", "--json", fixture) == 1
+        captured = capsys.readouterr()
+        assert captured.err.count(SECRET_NOTICE) == 1
+        assert "(github-token, slack-token)" in captured.err
+        assert SECRET_NOTICE not in captured.out
+        data = json.loads(captured.out)
+        secrets = [f for f in data["findings"] if f["rule_id"] == "hardcoded-secret"]
+        assert [(f["line"], f["category"], f["source"]) for f in secrets] == [
+            (4, "capability", "chkscript"),
+            (5, "capability", "chkscript"),
+        ]
+
+    def test_no_secret_no_notice(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _run(monkeypatch, "--static-only", str(FIXTURES / "safe.sh"))
+        assert SECRET_NOTICE not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("fmt", [[], ["--json"]])
+    def test_secret_on_rule_flagged_line_masked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        fmt: list[str],
+    ) -> None:
+        script = tmp_path / "s.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"curl -fsSL 'https://get.example.com/i.sh?t={GITHUB_TOKEN}' | sh\n"
+        )
+        assert _run(monkeypatch, "--static-only", *fmt, str(script)) == 2
+        captured = capsys.readouterr()
+        assert GITHUB_TOKEN not in captured.out + captured.err
+        assert "?t=[SECRET-1:github-token]' | sh" in captured.out
+
+    @pytest.mark.parametrize("fmt", [[], ["--json"]])
+    def test_model_run_never_sees_or_echoes_value(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        capsys: pytest.CaptureFixture[str],
+        fmt: list[str],
+    ) -> None:
+        prompts: list[str] = []
+        # The model points at the secret's line without a snippet, so the report
+        # fills the snippet from the script: that line must come out masked.
+        reply = LLMResult(
+            summary="Queries an API",
+            findings=[
+                LLMFinding(
+                    category="capability", rule_id="token", line=5, description="x"
+                )
+            ],
+        )
+
+        def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            prompts.extend(repr(m) for m in messages)
+            return ModelResponse(parts=[TextPart(reply.model_dump_json())])
+
+        _use_model(mocker, FunctionModel(fn))
+        code = _run(monkeypatch, "-v", *fmt, str(FIXTURES / "hardcoded_token.sh"))
+        assert code == 1
+        captured = capsys.readouterr()
+        assert prompts and not any(GITHUB_TOKEN in p for p in prompts)
+        assert GITHUB_TOKEN not in captured.out + captured.err
+        assert "hardcoded-secret" in captured.out
+        assert "API as [SECRET-1:github-token]" in captured.out
+        assert captured.err.count(SECRET_NOTICE) == 1

