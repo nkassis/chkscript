@@ -680,3 +680,25 @@ class TestHardcodedSecret:
         assert "hardcoded-secret" in captured.out
         assert "API as [SECRET-1:github-token]" in captured.out
         assert captured.err.count(SECRET_NOTICE) == 1
+
+    @pytest.mark.parametrize("fmt", [[], ["--json"]])
+    def test_model_rule_id_is_masked(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mocker: MockerFixture,
+        capsys: pytest.CaptureFixture[str],
+        fmt: list[str],
+    ) -> None:
+        # Rule ids are model output; a hostile or confused model can put
+        # anything there, including a value from the script.
+        reply = LLMResult(
+            summary="s",
+            findings=[
+                LLMFinding(category="capability", rule_id=GITHUB_TOKEN, description="x")
+            ],
+        )
+        _use_model(mocker, _model_returning(reply))
+        _run(monkeypatch, *fmt, str(FIXTURES / "hardcoded_token.sh"))
+        captured = capsys.readouterr()
+        assert GITHUB_TOKEN not in captured.out + captured.err
+        assert "llm.[SECRET-1:github-token]" in captured.out

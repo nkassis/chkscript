@@ -185,12 +185,14 @@ class TestMaskResult:
                     description=f"pipes {GITHUB}",
                     snippet=bundle.line_text(1),
                     line_reference=f"near {GITHUB}",
+                    rule_id=f"llm.{GITHUB}",
+                    file=f"https://x.example/?t={GITHUB}",
                 )
             ],
         )
         dumped = redact.mask_result(result, bundle.secrets).model_dump_json()
         assert GITHUB not in dumped
-        assert dumped.count("[SECRET-1:github-token]") == 5
+        assert dumped.count("[SECRET-1:github-token]") == 7
 
 
 class TestStaticUnchanged:

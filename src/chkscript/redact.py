@@ -226,12 +226,15 @@ def mask(text: str, secrets: list[DetectedSecret]) -> str:
 
 
 def mask_finding(finding: Finding, masker: Masker) -> Finding:
-    """Every text field of a finding, masked."""
+    """Every text field of a finding, masked. `rule_id` and `file` included: the
+    model chooses a rule id, and a fetched file is named by its URL."""
     return finding.model_copy(
         update={
             "description": masker(finding.description),
             "snippet": masker.optional(finding.snippet),
             "line_reference": masker.optional(finding.line_reference),
+            "rule_id": masker.optional(finding.rule_id),
+            "file": masker(finding.file),
         }
     )
 
