@@ -496,3 +496,23 @@ class TestPromptRedaction:
         assert seen
         assert not any(self.TOKEN in m for m in seen)
         assert any("[SECRET-1:github-token]" in m for m in seen)
+
+
+@pytest.mark.parametrize("value", ["pässwörd123", 'quo"ted-pw1', "back\\slash-pw1"])
+def test_static_payload_masked_before_json_escaping(value: str) -> None:
+    """A diagnostic quoting a credential that JSON would escape stays masked."""
+    bundle = _bundle(f"PASSWORD='{value}'\n".encode())
+    assert [s.value for s in bundle.secrets] == [value]
+    diagnostic = Finding(
+        severity=Severity.WARNING,
+        category="lint",
+        description=f"{value} references arguments, but none are ever passed.",
+        source="shellcheck",
+        rule_id="SC2120",
+        line=1,
+    )
+    prompt = analyzer.build_prompt(bundle, [diagnostic], "script-abc")
+    escaped = json.dumps(value)[1:-1]
+    assert value not in prompt
+    assert escaped not in prompt
+    assert "[SECRET-1:credential-variable] references arguments" in prompt
