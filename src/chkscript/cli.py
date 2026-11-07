@@ -6,6 +6,7 @@ import logging
 import sys
 from typing import NoReturn
 
+from chkscript import redact
 from chkscript.analyzer import (
     AnalysisError,
     FloorViolationError,
@@ -118,6 +119,9 @@ def _run_static(bundle: ScriptBundle) -> StaticResult:
     for notice in static.notices:
         logger.info("Notice: %s", notice)
     logger.info("Static tools: %s", ", ".join(static.tools))
+    secret_notice = redact.notice(bundle.secrets)
+    if secret_notice is not None:
+        logger.warning("Warning: %s", secret_notice)
     return static
 
 
@@ -221,6 +225,8 @@ def _run() -> NoReturn:
     else:
         result = _run_llm(bundle, static, model)
 
+    # Masking is always on: a snippet must not echo a credential into logs.
+    result = redact.mask_result(result, bundle.secrets)
     if args.json_output:
         print(format_json(result))
     else:

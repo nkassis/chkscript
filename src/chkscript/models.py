@@ -34,6 +34,20 @@ class ExtractedUrl(BaseModel):
     kind: Literal["literal", "variable"]
 
 
+class DetectedSecret(BaseModel):
+    """A hardcoded credential found in a script (see redact.py).
+
+    `value` is the raw secret: it never reaches output, the model, or a repr.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(repr=False)
+    kind: str
+    placeholder: str
+    lines: list[int] = Field(min_length=1)
+
+
 class ScriptBundle(BaseModel):
     """A preprocessed script: what every later stage reads instead of raw bytes."""
 
@@ -45,9 +59,13 @@ class ScriptBundle(BaseModel):
     # continuations joined, line numbers preserved (preprocess.join_continuations).
     rules_text: str
     numbered: str
+    # `numbered` with every detected secret replaced by its placeholder: the only
+    # form of the script that may be sent to a model.
+    masked_numbered: str
     sha256: str
     size: int = Field(ge=0)
     urls: list[ExtractedUrl] = Field(default_factory=list)
+    secrets: list[DetectedSecret] = Field(default_factory=list)
 
     def line_text(self, line: int) -> str | None:
         lines = self.text.split("\n")
