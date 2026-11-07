@@ -238,3 +238,14 @@ def test_unclosed_key_headers_scan_in_linear_time() -> None:
     start = time.perf_counter()
     assert redact.detect(text) == []
     assert time.perf_counter() - start < 2
+
+
+def test_many_secrets_stay_fast() -> None:
+    # Just under the 500 KB cap: one distinct secret per line.
+    raw = "".join(f"TOKEN_{i}=value{i:08d}abcd\n" for i in range(16000)).encode()
+    start = time.perf_counter()
+    bundle = preprocess(raw)
+    findings = redact.secret_findings(bundle)
+    redact.mask_result(AnalysisResult(summary="s", findings=findings), bundle.secrets)
+    assert len(findings) == 16000
+    assert time.perf_counter() - start < 10
