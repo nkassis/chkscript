@@ -39,6 +39,9 @@ The input is assumed hostile. An install script may be written by someone who kn
 | Parser evasion | shfmt cannot parse the file, so the syntax-tree rules cannot run | Parse failure is reported as its own coverage warning, and the regex fallback runs on that file. The fallback reports at least the unsafe findings the syntax-tree engine would (Testing, invariant 4), so an unparseable file never gets a quieter report |
 | Time-of-check vs time-of-use | Content served at scan time differs from what `curl` gets a minute later | Report carries the URL and SHA-256 of every file analyzed so the user can pin |
 | Data exfiltration via the scanner | Script contents sent to a cloud model; a hardcoded credential echoed into the report, CI logs or the prompt | Local mode via Ollama; a one-line notice whenever contents leave the machine; and redaction of what leaves: detected credentials are masked in the model prompt and in every rendered report, in every mode (Static layer, Secrets and redaction) |
+| Script supplies its own justification | A header comment or usage text claiming to be a system agent, so root, a service and a cron job all look proportionate | The user can state the purpose with `--expect`; without it the purpose is labeled `claimed` ("as the script describes itself"); reviewer-directed text is withheld from the model before it infers a purpose (NIM-152). Justification is descriptive and never changes a finding |
+
+Justification and the footprint summary never touch severity. A model that judges a capability `needed` lowers nothing, and one that judges it `unexplained` raises nothing by doing so; a raise still goes through the capability-to-unsafe path with its own reason (Merge rules).
 
 Two properties are non-negotiable and every later section is checked against them. First, no text inside a scanned script can lower the severity of a deterministic finding. Second, the scanner never executes anything it is analyzing, and never fetches anything it was not literally told about by a script already in hand.
 
@@ -130,12 +133,31 @@ The model may raise a `capability` finding to `unsafe`, with a reason. Nothing l
 | Category | Rules |
 | --- | --- |
 | unsafe | remote code chkscript could not inspect (`curl \| sh` and other interpreters, `bash <(curl ...)`, `sh -c "$(curl ...)"`, a downloaded script run unverified, `eval` of downloaded content); plain `http://` downloads; TLS verification disabled; decoded data fed to a shell; writes to sudoers, passwd, shadow or `ld.so.preload`; disabling SELinux, a firewall or a security service; `rm -rf` on an unguarded `"$VAR/..."` or an unquoted variable; world-writable files; setuid/setgid in a user-writable directory; and, when built, credential exfiltration, reverse shells, SSH key planting, package-trust bypass (`trusted=yes` and similar), PATH/LD_PRELOAD hijacking |
-| capability | runs as root; installs a systemd unit, cron job, or shell rc or profile change; writes to system paths (`/usr/local`, `/opt`, `/usr/bin`); a downloaded binary whose integrity rests on TLS only; `eval` of the user's own environment; `rm -rf` on a quoted or guarded variable; setuid in a system path; adding a signed package repository; running a nested script that chkscript fetched and scanned (phase 4); a hardcoded credential (`hardcoded-secret`, `source: chkscript`, which some vendors embed legitimately in per-account installers) |
+| capability | runs as root; installs a systemd unit, cron job, or shell rc or profile change; writes to system paths (`/usr/local`, `/opt`, `/usr/bin`); a downloaded binary whose integrity rests on TLS only; `eval` of the user's own environment; `rm -rf` on a quoted or guarded variable; setuid in a system path; adding a signed package repository, with its key's scope; adding a user to a root-equivalent group (`docker`, `lxd`, `libvirt`, `disk`); running a nested script that chkscript fetched and scanned (phase 4); a hardcoded credential (`hardcoded-secret`, `source: chkscript`, which some vendors embed legitimately in per-account installers) |
 
 - `unverified-download` is a capability, not unsafe. A checksum fetched from the same server over the same connection adds little: whoever can swap the binary can swap the checksum. Real added trust comes from a signature checked against a key obtained elsewhere, or a checksum pinned in the script itself. The downgrades that matter, `http://` and TLS verification off, stay unsafe.
 - `rm-rf-variable` is split. `rm -rf "$VAR/..."` with no guard that `VAR` is set, or `rm -rf` on an unquoted variable, is unsafe, because an empty or word-split value reaches `/` or an unintended path. `rm -rf` on a quoted or guarded variable (`"$TMP_DIR"`, `"${VAR:?}/..."`, a preceding `[ -n "$VAR" ]`) is a capability.
 - Each rule carries a one-line rationale in its message, which is what the model and the user both see.
 - Rule findings use `source: shfmt`, after the parser that produced the tree, as shellcheck findings use `source: shellcheck`.
+- `root-equivalent-group` (capability) fires on `usermod -aG`, `gpasswd -a` or `adduser <user> <group>` adding to `docker`, `lxd`, `libvirt` or `disk`. Membership in any of them is root in practice. Adding to `sudo` or `wheel` is not this rule; it belongs to `rogue-account` (NIM-110), which is unsafe.
+- `package-repo-added` (capability) records its key's scope: `scoped` when the repo is pinned to a `signed-by` keyring, `global` for `apt-key add` or a key written to `/etc/apt/trusted.gpg` or `/etc/apt/trusted.gpg.d/`. The message names the scope. A global key trusts that vendor for every package on the machine, but it is still a capability, consistent with NIM-97 leaving `apt-key add` out of the unsafe tier.
+
+**Footprint groups**
+
+Every capability rule declares exactly one footprint group. The groups are the vocabulary of the report's "What this script will do to your machine" section and of the footprint summary (Output and exit codes). A capability rule without a group fails a test, so no new rule can skip it. Lint and unsafe rules have no group.
+
+| Group | Rules (current and planned) | Plain words when absent |
+| --- | --- | --- |
+| `root` | `runs-as-root` | (stated by the `NEEDS` line instead) |
+| `persistence` | `persistence-append` (systemd unit, cron, shell rc or profile) | services, cron jobs, shell config |
+| `system-write` | `system-path-write`, `setuid-system` | system file writes |
+| `trust` | `package-repo-added`, `root-equivalent-group` | repos or group changes |
+| `download` | `unverified-download` (TLS only), nested script fetched and scanned (phase 4) | (stated by the `NEEDS` line instead) |
+| `other` | `eval-dynamic`, guarded `rm-rf-variable`, `reviewer-directed-text` (NIM-152), `hardcoded-secret` (NIM-151) | (never listed as absent) |
+
+Trust grants are a group of their own because they are the least visible and the longest lived. Adding a user to `docker` gives them root for as long as the membership lasts, and a global apt key outlives the install. Neither is an attack, and neither looks alarming in the script.
+
+A capability finding the model raised to unsafe keeps its group, so the footprint still counts it.
 
 **Regex fallback and parse failures**
 
@@ -160,7 +182,7 @@ The model owns intent: what the script installs, from where, whether downloads a
 
 **Agent**
 
-- Built on `pydantic-ai-slim` with the `anthropic` and `openai` extras. The agent's output type is `LLMResult`, a Pydantic model: `summary: str`, `findings: list[Finding]`, `notes: list[str]`, `fetched: list[FetchRecord]`.
+- Built on `pydantic-ai-slim` with the `anthropic` and `openai` extras. The agent's output type is `LLMResult`, a Pydantic model: `summary: str`, `findings: list[Finding]`, `notes: list[str]`, `fetched: list[FetchRecord]`, `purpose: str`, `assessments: list[CapabilityAssessment]`. `LLMResult` also carries `purpose_source: "user" | "claimed"`, which chkscript sets after the call and the model's output schema does not include (Justification, below).
 - Output mode is `NativeOutput` (schema enforced during generation) where the provider supports it, falling back to `ToolOutput`. This replaces the fence-stripping regex and the parse-and-retry loop.
 - `temperature=0` on every provider that accepts it, so the same script yields the same verdict.
 - `max_tokens` sized from the input: findings for a 500 KB script will not fit in 4096 tokens, so the budget scales with line count and truncation is detected from the stop reason and reported as an error rather than a partial result.
@@ -171,6 +193,9 @@ The model owns intent: what the script installs, from where, whether downloads a
 - Script content is wrapped in a delimiter randomized per run (`<script-7f3a9c>` ... `</script-7f3a9c>`), with the line-numbered form, so a literal `</script>` inside the file does nothing.
 - Static findings are passed as structured data, not prose, with their `source`, `rule_id` and `category`.
 - The model is asked specifically for: what gets installed and where; every network destination and whether it is verified; whether the script fetches and runs further content; signs of obfuscation; and anything the static rules missed.
+- The model states the script's purpose in one sentence, then assesses each capability finding it was given against that purpose: `needed`, `avoidable` or `unexplained`, with a one-line reason. An alternative must cite the line where the script supports it (an install-dir variable it honors, a flag it parses).
+- When the user gave `--expect`, that text goes into the prompt outside the script delimiter, labeled as the user's statement of purpose, and the model judges against it rather than inferring one. Behavior the stated purpose does not account for (asked for a CLI, the script also installs a service and a cron job) is what `unexplained` is for, and is evidence a capability-to-unsafe raise may cite.
+- The script text the model reads, for findings and for the purpose alike, is the masked form (NIM-151 secrets, NIM-152 reviewer-directed text), so text addressed to a reviewer can never become the stated purpose.
 
 **Merge rules**
 
@@ -180,6 +205,31 @@ The model owns intent: what the script installs, from where, whether downloads a
 - The model may raise a `capability` finding to `unsafe`, and must give a reason (for example, the cron job it installs re-downloads and runs a script every hour). The merged finding becomes `category: unsafe`, severity `unsafe`, keeps its static `rule_id`, lists `llm` in `merged_from`, and carries the model's reason in its description. A raise with no reason is ignored.
 - Nothing lowers anything. The model cannot move an `unsafe` finding to `capability`, a `capability` finding to `lint`, or drop a finding.
 - If the model call fails, the static report is still emitted, with a `warning` from `chkscript` that the LLM layer did not run, and the exit code reflects static findings only.
+- Assessments, `purpose` and `purpose_source` are outside the merge. They are never fed into it, into the floor check or into the exit code.
+
+**Justification**
+
+The verdict answers "is this hostile or broken?". Justification answers a separate question: "what will this do to my machine, and is that proportionate?". It is descriptive. It attaches to capability findings in the report and changes nothing about them.
+
+`CapabilityAssessment`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `file` | str | File of the capability finding assessed |
+| `line` | int or null | Its line |
+| `rule_id` | str | Its rule |
+| `verdict` | `needed` \| `avoidable` \| `unexplained` | Against the purpose |
+| `reason` | str | One line |
+| `alternative` | str or null | A way to do it with less, which the script supports |
+| `alternative_line` | int or null | Where the script supports it |
+
+Rules, enforced by chkscript after the call, not by the prompt:
+
+- An assessment is keyed on `(file, line, rule_id)`. One whose key matches no capability finding in the merged report is dropped, as is a second assessment for the same key.
+- `alternative` is kept only together with an `alternative_line` that is a line of the same file. Otherwise it is dropped and the verdict and reason stay. chkscript checks that the line exists, not that the model read it right; the user sees the cited line and can check it.
+- A capability finding with no assessment is rendered without one. The report never invents a verdict.
+- `purpose_source` is set by chkscript, not taken from the model: `user` when `--expect` was given, and then `purpose` is the user's text verbatim; otherwise `claimed`, and `purpose` is the model's sentence.
+- In `--static-only`, or when the model call fails, there is no purpose and no assessment.
 
 **Model-dependent degradation**
 
@@ -283,6 +333,7 @@ chkscript --json install.sh | jq '.findings[] | select(.severity == "unsafe")'
 | `--depth N` | 2 | Max nested fetch depth, capped at 4 |
 | `--max-fetches N` | 5 | Total fetch budget per run |
 | `--fail-on {warning,unsafe}` | `warning` | Lowest severity that produces a non-zero exit; `unsafe` makes warnings informational |
+| `--expect TEXT` | none | What the user expects the script to do (`--expect "install the k3d CLI"`); capabilities are judged against it instead of the purpose the script claims. No effect in `--static-only` |
 | `--json` | off | Machine-readable output |
 | `-v`, `--verbose` | off | Show snippets for every finding and the full fetch tree |
 | `--quiet` | off | Suppress notices on stderr |
@@ -316,6 +367,7 @@ chkscript invents no secret variables of its own. Provider secrets use the names
 | `CHKSCRIPT_MAX_FETCHES` | `--max-fetches` | Fetch budget |
 | `CHKSCRIPT_FAIL_ON` | `--fail-on` | Exit threshold |
 | `CHKSCRIPT_NO_FOLLOW` | `--no-follow` | `1` to withhold the fetch tool |
+| `CHKSCRIPT_EXPECT` | `--expect` | User-stated purpose for justification |
 
 **`_FILE` suffix**
 
@@ -354,21 +406,72 @@ The v0.1 exit code contract is kept so existing pipes keep working; the finding 
   "line": 42 | null,
   "description": "...",
   "snippet": "..." | null,
-  "merged_from": ["shfmt", "llm"]
+  "merged_from": ["shfmt", "llm"],
+  "group": "root" | "persistence" | "system-write" | "trust" | "download" | "other" | null
 }
 ```
 
-`category` and `severity` always agree: `unsafe` is severity `unsafe`, `capability` and `lint` are severity `warning`. A model raise changes both together. `chkscript`'s coverage notices (shfmt parse failure, LLM layer did not run) are `category: lint`; its refused-fetch finding is `category: unsafe`. `generated` is true for findings in a generated child file, whose `file` is the path the heredoc was written to.
+`category` and `severity` always agree: `unsafe` is severity `unsafe`, `capability` and `lint` are severity `warning`. A model raise changes both together. `chkscript`'s coverage notices (shfmt parse failure, LLM layer did not run) are `category: lint`; its refused-fetch finding is `category: unsafe`. `generated` is true for findings in a generated child file, whose `file` is the path the heredoc was written to. `group` is the footprint group of a capability rule, kept after a model raise to unsafe, and null for every other finding.
 
-Top level adds `fetch_tree`, `mode` (which of the three ran), `model` (selector actually used, or null), `static_tools` (which of shellcheck, shfmt, regex ran), and keeps `summary`, `findings`, `notes`, `max_severity`.
+Top level adds `fetch_tree`, `mode` (which of the three ran), `model` (selector actually used, or null), `static_tools` (which of shellcheck, shfmt, regex ran), `footprint`, `purpose` (string or null), `purpose_source` (`user`, `claimed` or null) and `assessments` (a list of `CapabilityAssessment`, empty without a model), and keeps `summary`, `findings`, `notes`, `max_severity`.
+
+**Footprint summary**
+
+The footprint is computed by chkscript from the merged findings and the downloads the command model recorded, never by the model, so `--static-only` shows it too. It covers every file in the run, since a generated child file that installs a service is still the machine's footprint.
+
+```
+"footprint": {
+  "privilege": "user" | "root" | null,
+  "persistence": true | false | null,
+  "network_hosts": ["github.com", "(unresolved)"],
+  "coverage": "full" | "reduced",
+  "unresolved_at": [{"file": "<entry>", "line": 42}],
+  "absent": ["persistence", "trust"] | null
+}
+```
+
+- `privilege` is `root` when any `runs-as-root` finding exists. `persistence` is true when any `persistence` group finding exists.
+- `network_hosts` are the distinct hosts of the URLs the script downloads from (per-path download tracking in the command model; under the regex fallback, the hosts of the preprocessing URL candidates that feed a download command). A download whose host is not a constant adds `(unresolved)`, so a variable-built URL cannot shrink the list.
+- `coverage` is `reduced` when the regex fallback ran on any file in the run, or shfmt failed on one. `unresolved_at` lists every `eval-dynamic` finding and every unknown command fed a download.
+- `absent` lists the groups among `persistence`, `system-write` and `trust` that have no finding. It is null unless `coverage` is `full` and `unresolved_at` is empty, because a statement that something is absent is a claim, and a quieter report must never be what an evasive script earns. Under the same condition, a `privilege` of `user` and a `persistence` of false become null: chkscript states a negative only when it can back it.
 
 **Terminal output**
 
-- Header line: mode, model, static tools, and the leaves-the-box notice on stderr when applicable.
-- Summary paragraph from the model (or "static analysis only" in static-only mode).
-- Findings grouped by file, entry script first, then generated child files under their parent, then fetched files in tree order. Each line shows severity, line number, source tag and description; `unsafe` findings always show the snippet, warnings only with `-v`.
-- Within each file, `unsafe` findings come first. `capability` findings follow in their own section, headed "What this script will do to your machine", as a plain list of what the script does (runs as root, installs `/etc/systemd/system/ollama.service`, writes to `/usr/local/bin`). `lint` findings come last.
-- Fetch tree at the end: URL, depth, SHA-256 (first 12 characters, full in JSON), size, and the model's stated reason. Always shown, since it is the record of what was actually analyzed.
+The default (non-verbose) report reads top to bottom as verdict, footprint, justification, concerns, record. Illustrative, for a CLI installer with one unsafe line:
+
+```
+chkscript · install.sh · full · anthropic:claude-sonnet-5-5 · shellcheck, shfmt
+
+VERDICT   UNSAFE   1 unsafe · 4 lint (-v to show)
+NEEDS     root · no persistent changes · downloads from 2 hosts
+
+Purpose (as the script describes itself): installs the k3d CLI
+
+What this script will do to your machine
+  root          Runs commands as root (3 places)                   L142
+                Needed: writes to a system bin directory
+  system-write  Installs /usr/local/bin/k3d                        L142
+                Avoidable: set K3D_INSTALL_DIR to a user directory  L23
+  download      Downloads k3d verified only by TLS                 L88
+  No other changes found: no services, cron jobs, shell config, repos or group changes
+
+Concerns
+  UNSAFE  L91  Downloaded content is piped into a shell
+               curl -fsSL "$url" | sh
+
+Analyzed
+  <entry>  sha256 3f9a1c…  4.1 KB
+```
+
+- **Header line**: file, mode, model, static tools. The leaves-the-box notice stays on stderr.
+- **`VERDICT`**: `SAFE`, `WARNING` or `UNSAFE` from `max_severity`, then counts by category. Lint is folded unless `-v`.
+- **`NEEDS`**: the footprint in one line. `root` or `user`; `persistent changes` or `no persistent changes`; `downloads from N hosts` (with `(N unresolved)` when any are) or `no downloads`. Where the footprint field is null, the term reads `root not ruled out` or `persistence not ruled out`.
+- **Purpose**: from `purpose`, labeled `(as the script describes itself)` when `purpose_source` is `claimed` and `(as you stated it)` when `user`. Absent without a model.
+- **What this script will do to your machine**: capability findings as short plain lines, grouped by footprint group with the group as a label, each with its line (and its file, when it is not the entry script). Findings of one rule in one file collapse into one line with a count and the first line; `-v` expands them. Under each line, an optional second line renders its assessment: `Needed:`, `Avoidable:` or `Unexplained:`, then the alternative and its line when there is one, otherwise the reason. A collapsed line shows the most concerning verdict among its findings (`unexplained`, then `avoidable`, then `needed`). The formatter renders that second line from data; nothing about it is special-cased.
+- **Absence line**, ending the section, one of: `No other changes found: no <plain words of each absent group>` (Footprint groups table; omitted when no group is absent); `Not checked: static coverage reduced` when `coverage` is `reduced`; `Other changes possible: the script runs code chkscript could not resolve (line N)` for the first entry in `unresolved_at`. When both of the last two apply, both lines are shown.
+- **Concerns**: unsafe findings, each with its snippet, as before. A capability raised to unsafe appears here, with the model's reason.
+- **Analyzed**: the fetch tree. URL, depth, SHA-256 (first 12 characters, full in JSON), size, and the model's stated reason. Always shown, since it is the record of what was actually analyzed.
+- `--static-only`: no Purpose line and no assessment lines, and the capability section ends with one line, `Run with a model to get a justification for each.`
 - Colors via ANSI only when stdout is a TTY, and off under `NO_COLOR` or `--no-color`.
 
 **Exit codes**
@@ -488,11 +591,32 @@ The static layer is tested as a golden suite against fixture scripts; the LLM la
 | `nested_http.sh` | unsafe | Plain-http second stage |
 | `nested_binary.sh` | warning or unsafe | Downloads a binary with and without checksum verification |
 | `k3d-no-checksum.sh`, `k3d-with-checksum.sh` | warning / warning | Real-world installers kept from v0.1, now in `tests/corpus/`. Under the capability tier the unverified download and the quoted `rm -rf "$K3D_TMP_ROOT"` are capabilities, so neither is unsafe |
+| `docker_group.sh` | warning | `usermod -aG docker "$USER"`: `root-equivalent-group` in group `trust`; the same line with `sudo` does not fire it |
+| `apt_global_key.sh`, `apt_signed_by.sh` | warning / warning | The same repo added with a global key and with a `signed-by` keyring; `package-repo-added` names the scope in its message |
+
+**Justification fixtures (phase 3b)**
+
+Run with `TestModel`/`FunctionModel` for the assessment rules, and under `--run-live` for the expected verdicts.
+
+| Fixture | Run with | Expected assessments |
+| --- | --- | --- |
+| `cli_needs_root.sh` | no `--expect` | A CLI installed to `/usr/local/bin` with sudo and an install-dir variable: root `needed`; system write `avoidable`, with `alternative_line` on the variable's line |
+| `cli_installs_service.sh` | `--expect "install the CLI"` | A CLI installer that also writes a systemd unit and a cron entry: both `unexplained` |
+| `docker_group.sh` | no `--expect` | `root-equivalent-group` assessed; the finding's category and severity unchanged whatever the verdict |
+
+Unit tests for the assessment rules: an assessment keyed to no capability finding is dropped; an alternative without a valid `alternative_line` is dropped while the verdict stays; a finding with no assessment renders without one; `purpose_source` is `user` with `--expect` whatever the model returns.
+
+**Footprint tests (phase 2c)**
+
+- Every capability rule declares a group (a test enumerates the rules).
+- The absence line in each form: full coverage, regex fallback, unresolved dynamic code, and both of the last two.
+- `network_hosts` counts an unresolved host, and `privilege`/`persistence` go null when the absence claim cannot be backed.
 
 **Real-installer corpus (`tests/corpus/`)**
 
 - Pinned copies of popular installers with agreed verdicts in `tests/corpus/expected.toml`; any drift fails the suite.
 - Re-baselined with categories when the syntax-tree engine (2b) and the capability tier (2c) land: each entry records its finding's `category` as well as its rule and lines, and the agreed `max_severity` is re-agreed under the new classification.
+- Each entry also records the installer's expected `footprint` (privilege, persistence, hosts, coverage, absent groups). It is deterministic, so it belongs in `expected.toml`; assessments are not, so they never go there.
 
 **Unit tests**
 
@@ -514,6 +638,7 @@ A `--run-live` pytest flag runs the fixture suite against a real provider (Ollam
 2. For every fixture, no fetch is attempted for a URL absent from the allowlist (asserted on the test server's request log).
 3. Running the same fixture twice with the same model yields identical findings (temperature 0).
 4. Fallback superset: on every corpus file, the regex fallback reports at least the unsafe findings the syntax-tree engine reports (same `rule_id` on the same file). Losing the parser can add findings, never remove an unsafe one.
+5. Justification is inert: for every fixture, deleting `assessments`, `purpose` and `footprint` from the result leaves `findings`, `max_severity` and the exit code identical.
 
 ## Build order
 
@@ -522,11 +647,12 @@ Each phase leaves the tool shippable; the static floor goes in before anything t
 1. **Scaffold** (NIM-71, merged). New layout, Pydantic models, `config.py` with precedence and `_FILE`, Python floor to 3.11, claude-code-patterns python stack and security layer applied (hooks, pre-commit, CI, secret scan), CLAUDE.md and AGENT.md filled from the templates, .env.example added, remove the stray `tests/examples/bash` file. Gate: existing v0.1 tests pass against the new models.
 2. **Static layer** (NIM-81, merged). Preprocessing, shellcheck adapter, regex fallback, parse-failure finding, merge. `--static-only` works end to end with no API key. The default mode runs the static layer, then the v0.1 LLM pass, merged, so the floor applies before phase 3. Gate: golden suite green for every fixture that does not need the model. This phase shipped a Semgrep engine; the NIM-95 corpus showed it parses 5 of 11 real installers, and 2b replaces it.
    - **2b. Syntax-tree engine** (NIM-122). shfmt adapter with version check, the command model (heredocs as data, wrappers, constants, embedded code, generated child files, per-path downloads), the existing rules ported to Python functions over it, Semgrep and its YAML removed, regex fallback limited to shfmt missing or a parse failure. Gate: all 11 corpus installers parse; the corpus re-baselined; fallback-superset invariant (property test 4) passes.
-   - **2c. Capability tier** (NIM-123). `category` on `Finding`, rules reclassified per the classification table (`unverified-download` to capability, `rm-rf-variable` split), the "What this script will do to your machine" report section, the model's capability-to-unsafe raise in the merge. Gate: corpus re-agreed with categories; capability-only scripts exit 1.
+   - **2c. Capability tier** (NIM-123). `category` on `Finding`, rules reclassified per the classification table (`unverified-download` to capability, `rm-rf-variable` split), `root-equivalent-group` and key scope on `package-repo-added`, footprint groups on every capability rule, the "What this script will do to your machine" report section with room for an assessment line under each entry, the footprint summary (`NEEDS` line and JSON `footprint`) and the absence line, the model's capability-to-unsafe raise in the merge. Gate: corpus re-agreed with categories and footprints; capability-only scripts exit 1.
    - The rescoped rule issues follow 2c: every download-and-execute form and disabled TLS (NIM-96), then credential exfiltration, reverse shells, SSH key planting, package-trust bypass and PATH/LD_PRELOAD hijacking (NIM-97), each written against the command model.
-3. **LLM layer, no-follow.** `LLMAnalyzer` on pydantic-ai with `NativeOutput`, randomized delimiter, static findings passed in, merge rules. Providers: Anthropic and Ollama. The hosted default switches to `anthropic:claude-sonnet-5-5`, and `cli.py`'s hard `ANTHROPIC_API_KEY` check is removed in favor of the auto-detection order; until both happen, local mode cannot run. Gate: injection fixtures hold; property test 1 passes with `TestModel`.
+3. **LLM layer, no-follow** (NIM-134, merged). `LLMAnalyzer` on pydantic-ai with `NativeOutput`, randomized delimiter, static findings passed in, merge rules. Providers: Anthropic and Ollama. The hosted default switches to `anthropic:claude-sonnet-5-5`, and `cli.py`'s hard `ANTHROPIC_API_KEY` check is removed in favor of the auto-detection order; until both happen, local mode cannot run. Gate: injection fixtures hold; property test 1 passes with `TestModel`.
+   - **3b. Justification** (NIM-162). `purpose`, `purpose_source` and `assessments` on `LLMResult`, the prompt contract for assessing each capability, the assessment rules enforced after the call, `--expect` and `CHKSCRIPT_EXPECT`, the assessment lines and Purpose line in the report. Reads the masked script from NIM-151 and NIM-152. Gate: the justification fixtures; property test 5.
 4. **Fetch tool.** `fetch.py` with every guardrail, local test server, fetch tree in the report, refused-fetch finding. Gate: every guardrail row has a failing-then-passing test; property test 2 passes.
-5. **CLI and output.** Three modes, `--fail-on`, auto-detection, leaves-the-box notice, capability probing, terminal and JSON formats. Gate: snapshot tests; README rewritten.
+5. **CLI and output.** Three modes, `--fail-on`, auto-detection, leaves-the-box notice, capability probing, terminal and JSON formats, including the header and `VERDICT` lines of the layout in Output and exit codes. Gate: snapshot tests; README rewritten.
 6. **Release.** `--run-live` against Ollama and Anthropic on the fixture suite; tag 0.2.0; publish to PyPI with extras.
 
 Phases 1 and 2 are the bulk of the value and carry no API cost to develop. Phase 4 is the one most likely to grow; keep its scope to the guardrail table.
@@ -542,3 +668,6 @@ Phases 1 and 2 are the bulk of the value and carry no API cost to develop. Phase
 - [ ] Whether a `--allow-host` flag for variable-built URLs the model cannot resolve is worth the added surface.
 - [ ] Report format for the fetch tree in non-verbose terminal mode: full tree or one summary line with counts.
 - [x] Logging: stdlib `logging` to stderr, no structlog. A `--debug` flag, if wanted, only raises the log level.
+- [ ] Should the purpose default from the URL the script was piped from, when there is one, rather than from the script's own text?
+- [ ] Should an `unexplained` assessment on a `root` or `persistence` capability be shown above Concerns, not only inside the capability section?
+- [ ] Where the model's `summary` paragraph sits in the new terminal layout: under the Purpose line, or only with `-v`.
