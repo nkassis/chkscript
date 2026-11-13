@@ -4,20 +4,25 @@
 # change is judged against. When a rule change moves a result, update the entry
 # and say why in the PR.
 #
-# Per installer: `max_severity`, and one [[<name>.finding]] per rule that fires:
-#   rule     static rule id (Semgrep/regex rule, shellcheck SC code, or a
+# Per installer: `max_severity` (or `shfmt_max_severity` / `regex_max_severity`
+# when the engines differ), and one [[<name>.finding]] per rule that fires:
+#   rule     static rule id (syntax-tree/regex rule, shellcheck SC code, or a
 #            chkscript coverage warning)
-#   verdict  "true-positive": the matched code runs during install and does
-#            what the rule describes.
+#   verdict  "true-positive": the matched code runs, during install or later
+#            from a generated file the installer writes, and does what the
+#            rule describes.
 #            "noise": the match is on text that never runs during install (a
-#            heredoc message, the body of a generated file), a wrong span, a
-#            lint that is not a safety concern, or a benign idiom the rule was
-#            not written for.
+#            heredoc message), a wrong span, a lint that is not a safety
+#            concern, or a benign idiom the rule was not written for.
 #   note     one line; mktemp cleanups say "mktemp cleanup" so they can be counted
 #   lines    unsafe-tier rules only: the exact lines that fire
-#   engines  optional; defaults to both ["semgrep", "regex"]
+#   file     optional; a generated child file's path as written (findings in a
+#            heredoc the installer writes and later runs); defaults to the
+#            installer itself. Lines are then the child's own.
+#   engines  optional; defaults to both ["shfmt", "regex"]. An entry for the
+#            regex engine alone is where the fallback over-reports by design.
 #
-# shellcheck and semgrep-parse-error entries are pinned by rule id, not line.
+# shellcheck entries are pinned by rule id, not line or file.
 
 [rustup]
 max_severity = "unsafe"
@@ -26,34 +31,32 @@ max_severity = "unsafe"
 rule = "unverified-download"
 lines = [175]
 verdict = "true-positive"
-note = "Downloads rustup-init over HTTPS and runs `chmod u+x` with no checksum or signature check; trust rests on TLS alone."
+note = "Downloads rustup-init over HTTPS (through `ensure downloader`) and runs `chmod u+x` with no checksum or signature check; trust rests on TLS alone."
 
 [[rustup.finding]]
-rule = "semgrep-parse-error"
-engines = ["semgrep"]
+rule = "unverified-download"
+lines = [315]
+engines = ["regex"]
 verdict = "noise"
-note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+note = "Regex fallback only: `chmod u+x \"$_tmp\"` on a helper decoded from a heredoc, not a download; the fallback ties files by text and no verifier names $_tmp."
 
 [homebrew]
-max_severity = "unsafe"
+max_severity = "safe"
+regex_max_severity = "unsafe"
 
 [[homebrew.finding]]
 rule = "unverified-download"
 lines = [614]
+engines = ["regex"]
 verdict = "noise"
-note = "Fires on `sudo chmod 775 ${HOMEBREW_PREFIX}` inside an abort-message heredoc; Homebrew installs via git, not a downloaded executable."
+note = "Regex fallback only: `sudo chmod 775 ${HOMEBREW_PREFIX}` inside an abort-message heredoc; the syntax tree knows the heredoc is printed, not run."
 
 [[homebrew.finding]]
 rule = "eval-dynamic"
 lines = [1173, 1181]
+engines = ["regex"]
 verdict = "noise"
-note = "Both are `eval \"$(brew shellenv)\"` text inside `cat <<EOS` instructions printed for the user, never run by the installer."
-
-[[homebrew.finding]]
-rule = "semgrep-parse-error"
-engines = ["semgrep"]
-verdict = "noise"
-note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+note = "Regex fallback only: `eval \"$(brew shellenv)\"` text inside `cat <<EOS` instructions printed for the user, never run by the installer."
 
 [nvm]
 max_severity = "unsafe"
@@ -62,13 +65,7 @@ max_severity = "unsafe"
 rule = "unverified-download"
 lines = [291]
 verdict = "true-positive"
-note = "Downloads nvm.sh, nvm-exec and completion over HTTPS (curl/wget path) and marks nvm-exec executable with no checksum check."
-
-[[nvm.finding]]
-rule = "semgrep-parse-error"
-engines = ["semgrep"]
-verdict = "noise"
-note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+note = "Downloads nvm.sh, nvm-exec and completion over HTTPS (through nvm_download) and marks nvm-exec executable with no checksum check."
 
 [docker]
 max_severity = "warning"
@@ -78,20 +75,37 @@ rule = "SC2317"
 verdict = "noise"
 note = "shellcheck: unreachable command; a lint, not a safety concern."
 
-[[docker.finding]]
-rule = "semgrep-parse-error"
-engines = ["semgrep"]
-verdict = "noise"
-note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
-
 [k3s]
 max_severity = "unsafe"
 
 [[k3s.finding]]
 rule = "rm-rf-variable"
-lines = [237, 354, 878, 943, 952]
+lines = [237, 354]
 verdict = "noise"
-note = "237: constant BIN_DIR test path inside `sh -c`; 354: mktemp cleanup of TMP_DIR; 878, 943, 952: text of the generated killall/uninstall scripts (heredocs), not run at install."
+note = "237: BIN_DIR test path inside `sh -c` (BIN_DIR is not a constant: it can come from the environment); 354: mktemp cleanup of TMP_DIR."
+
+[[k3s.finding]]
+rule = "rm-rf-variable"
+file = "$KILLALL_K3S_SH"
+lines = [75]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Generated k3s-killall.sh (written at 803, chmod 755 at 896), line 878 of the installer: `xargs ... sh -c 'umount -f \"$0\" && rm -rf \"$0\"'` on paths read from /proc/self/mounts; runs later as root, not at install."
+
+[[k3s.finding]]
+rule = "rm-rf-variable"
+file = "$UNINSTALL_K3S_SH"
+lines = [39, 48]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Generated k3s-uninstall.sh (written at 904, chmod 755 at 1015), installer lines 943 and 952: `rm -rf \"$1\"` and `rm -rf \"$path\"` in the uninstaller's mount cleanup helpers; paths come from its own arguments, and the code runs only on uninstall."
+
+[[k3s.finding]]
+rule = "rm-rf-variable"
+lines = [878, 943, 952]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: the same commands as the generated-file entries above, seen as heredoc text in place."
 
 [[k3s.finding]]
 rule = "eval-dynamic"
@@ -99,15 +113,47 @@ lines = [1203]
 verdict = "true-positive"
 note = "`eval set -- $(escape \"${INSTALL_K3S_EXEC}\") ...` evaluates environment-supplied text; deliberate and escaped, but exactly what the rule describes."
 
-# Line 580 (`$SUDO chown root:root ${TMP_BIN}`) used to fire insecure-permissions
-# under Semgrep only: its pattern-regex `(\S+\s+)*` crossed newlines to a later
-# /tmp. NIM-98 confined every pattern-regex to one line, so the engines agree.
+[[k3s.finding]]
+rule = "curl-pipe-shell"
+lines = [1193]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: `$SUDO ${XTABLES}-save | ... | $SUDO ${XTABLES}-restore`; the fallback reads a variable command piped to a variable receiver as a possible download run by a shell."
 
 [[k3s.finding]]
-rule = "semgrep-parse-error"
-engines = ["semgrep"]
+rule = "unverified-download"
+lines = [896, 1015]
+engines = ["regex"]
 verdict = "noise"
-note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+note = "Regex fallback only: `chmod 755` on the generated killall/uninstall scripts, not downloads; no verifier line names them."
+
+# Line 580 (`$SUDO chown root:root ${TMP_BIN}`) used to fire insecure-permissions
+# under Semgrep only: its pattern-regex `(\S+\s+)*` crossed newlines to a later
+# /tmp. NIM-98 confined every pattern-regex to one line, and Semgrep is gone.
+
+[[k3s.finding]]
+rule = "SC1008"
+engines = ["shfmt"]
+verdict = "noise"
+note = "shellcheck, in the generated OpenRC service file: `#!/sbin/openrc-run` is not a shebang shellcheck knows; lint."
+
+[[k3s.finding]]
+rule = "SC2016"
+engines = ["shfmt"]
+verdict = "noise"
+note = "shellcheck, in the generated killall script: `$0` inside single quotes for `sh -c`; deliberate, lint."
+
+[[k3s.finding]]
+rule = "SC2068"
+engines = ["shfmt"]
+verdict = "noise"
+note = "shellcheck, in the generated killall and uninstall scripts: unquoted array expansion; robustness lint."
+
+[[k3s.finding]]
+rule = "SC2231"
+engines = ["shfmt"]
+verdict = "noise"
+note = "shellcheck, in the generated killall script: unquoted expansion in a for-loop glob; lint."
 
 [[k3s.finding]]
 rule = "SC2006"
@@ -152,6 +198,13 @@ rule = "rm-rf-variable"
 lines = [19]
 verdict = "noise"
 note = "mktemp cleanup: `rm -rf $TEMP_DIR` where TEMP_DIR=$(mktemp -d) on line 18."
+
+[[ollama.finding]]
+rule = "curl-pipe-shell"
+lines = [146, 154, 369, 371]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: `curl ... | $SUDO tar -xzf -`; the fallback reads a variable receiver as a possible shell, where the syntax tree resolves SUDO to sudo or empty."
 
 [[ollama.finding]]
 rule = "rm-rf-variable"
@@ -205,10 +258,11 @@ verdict = "noise"
 note = "mktemp cleanup: 569 removes _dir=$(mktemp -d); 1395 removes the two mktemp dirs from lines 1349-1350."
 
 [[uv.finding]]
-rule = "semgrep-parse-error"
-engines = ["semgrep"]
+rule = "unverified-download"
+lines = [1366, 1373, 1742]
+engines = ["regex"]
 verdict = "noise"
-note = "Accurate coverage notice (Semgrep cannot fully parse the file), but it says nothing about the script."
+note = "Regex fallback only: chmod +x on binaries extracted from the verified archive (1366, 1373) and on a helper decoded from a heredoc (1742); no verifier line names those paths."
 
 [bun]
 max_severity = "unsafe"
