@@ -45,7 +45,7 @@ _VAR = r"\$\{?[A-Za-z_]\w*\}?"
 _COMMAND_START = r"(?:^|[;&|({`]|\$\(|\b(?:then|do|else|sudo|env|exec|command)\b)[ \t]*"
 # A variable run as a command: the engine may resolve it to curl or a shell.
 _VAR_COMMAND = rf"{_COMMAND_START}{_VAR}(?=[ \t|;&)]|$)"
-_SHELL_STAGE = rf"(?<!\|)\|(?!\|)[ \t]*(?:(?:sh|bash|zsh|sudo|doas)\b|{_VAR})"
+_SHELL_STAGE = rf"(?<!\|)\|(?!\|)[ \t]*(?:(?:sh|bash|zsh|sudo|doas)\b|\"?{_VAR})"
 _WRITE = r"(?:>{1,2}|\btee[ \t]+(?:-a[ \t]+)?)"
 _COPY_TO = r"\b(?:cp|mv|install|ln)[ \t]+[^;&|\n]*[ \t]"
 _SED_I = r"\bsed[ \t]+-i\S*[ \t]+[^;&|\n]*[ \t]"

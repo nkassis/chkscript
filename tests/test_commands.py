@@ -217,6 +217,28 @@ def test_constant_value_is_still_an_expansion() -> None:
     assert [(a.literal, a.expanded) for a in rm.args[1:]] == [("/", True)] * 2
 
 
+@pytest.mark.parametrize(
+    "decl", ["local r=cat", "declare r=cat", "typeset r=cat"], ids=str.split
+)
+def test_function_local_is_unknown_outside_the_function(decl: str) -> None:
+    model = _model(f"f() {{ {decl}; }}\nr=cat\ncurl x | $r")
+    [receiver] = [c for c in model.commands if c.stage == 1]
+    assert receiver.argv[0].values is None
+
+
+def test_declare_g_in_a_function_is_global() -> None:
+    model = _model('f() { declare -g r=cat; }\nf\ncurl x | "$r"')
+    [receiver] = [c for c in model.commands if c.stage == 1]
+    assert receiver.name == "cat"
+
+
+def test_function_local_still_resolves_inside_an_inlined_call() -> None:
+    model = _model('dl() {\n  local tool=curl\n  "$tool" -o "$1" x\n}\ndl /tmp/t')
+    assert any(
+        d.path is not None and d.path.literal == "/tmp/t" for d in model.downloads
+    )
+
+
 def test_constant_flag_is_still_a_flag() -> None:
     model = _model("FLAGS=-fsSL\ncurl $FLAGS -o /tmp/t https://x.example/t")
     [download] = model.downloads

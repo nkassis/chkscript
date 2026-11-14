@@ -509,6 +509,13 @@ def _collect_constants(tree: Node) -> _Constants:
             value = _literal_word(node.get("Value"))
             constants.record(name, pos, None if value is None else (value,))
 
+    in_function = {
+        id(inner)
+        for node in _iter_nodes(tree)
+        if node.get("Type") == "FuncDecl"
+        for inner in _iter_nodes(node.get("Body"))
+    }
+
     for node in _iter_nodes(tree):
         kind = node.get("Type")
         if kind == "CallExpr":
@@ -524,9 +531,18 @@ def _collect_constants(tree: Node) -> _Constants:
                 for a in node.get("Args") or []
                 if a.get("Naked") and a.get("Value") is not None
             )
+            variant = node.get("Variant", {}).get("Value")
+            # A function's local cannot tell what the name holds outside it.
+            local = variant == "local" or (
+                variant in ("declare", "typeset")
+                and id(node) in in_function
+                and "g" not in flags
+            )
             for item in node.get("Args") or []:
                 name = item.get("Name", {}).get("Value")
-                if name and "n" in flags:
+                if name and local:
+                    mark(name, _pos(item))
+                elif name and "n" in flags:
                     mark(name, _pos(item))  # nameref: an alias, not a value
                     target = _literal_word(item.get("Value"))
                     if target and _IDENTIFIER.fullmatch(target):
