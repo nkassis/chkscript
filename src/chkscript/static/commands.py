@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import posixpath
 import re
+import sys
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -394,6 +395,9 @@ class _Constants:
     def record(self, name: str, pos: int, value: tuple[str, ...] | None) -> None:
         self._entries.setdefault(name, []).append((pos, value))
 
+    def assigns(self, name: str) -> bool:
+        return name in self._entries
+
     def lookup(self, name: str, pos: int) -> list[tuple[str, ...]] | None:
         """The literal values of `name` at byte offset `pos`, or None.
 
@@ -758,6 +762,9 @@ class _Ctx:
     as_root: bool = False
     depth: int = 0
     inlining: tuple[str, ...] = ()
+    # The constants of each embedded program around this code, innermost
+    # last; the entry file's own are the builder's.
+    scopes: tuple[_Constants, ...] = ()
 
     def line(self, node: Node) -> int:
         return _line(node) + self.line_offset
@@ -994,6 +1001,7 @@ class _Builder:
                 as_root=command.as_root,
                 redirects=command.redirects,
                 inlining=(*ctx.inlining, name),
+                scopes=(),  # function bodies are in the entry file
             )
             self._stmt(body, inner)
         produced = self.model.commands[first:]
@@ -1054,6 +1062,7 @@ class _Builder:
             stage=0,
             redirects=(),
             depth=ctx.depth + 1,
+            scopes=(*ctx.scopes, _collect_constants(tree)),
         )
         self.walk(tree.get("Stmts") or [], inner)
 
@@ -1238,7 +1247,7 @@ class _Builder:
             return [[head[n - 1]]]
         if frame is not None and name in frame.locals:
             return _from_variable(_select(frame.locals[name], index))
-        values = self._constants.lookup(name, ctx.at(part))
+        values = self._constant(name, part, ctx)
         if values is None:
             return None
         out: list[list[Arg]] = []
@@ -1248,6 +1257,22 @@ class _Builder:
                 return None
             out.extend(chosen)
         return _from_variable(out)
+
+    def _constant(
+        self, name: str, part: Node, ctx: _Ctx
+    ) -> list[tuple[str, ...]] | None:
+        """A constant's values: the innermost embedded program that assigns
+        the name answers (at this word, or for an enclosing program, at any
+        point after its first assignment); else the entry file, at the
+        position of the code that embeds this one. Outer values stay visible
+        because the outer shell expands unquoted heredocs and "..." strings
+        before the inner one runs."""
+        for depth in range(len(ctx.scopes) - 1, -1, -1):
+            scope = ctx.scopes[depth]
+            if scope.assigns(name):
+                innermost = depth == len(ctx.scopes) - 1
+                return scope.lookup(name, _pos(part) if innermost else sys.maxsize)
+        return self._constants.lookup(name, ctx.at(part))
 
     def _bind(self, assign: Node, ctx: _Ctx) -> None:
         """Record an assignment's value in an inlined body's locals."""
