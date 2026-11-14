@@ -110,7 +110,9 @@ class Arg:
 
     @property
     def is_flag(self) -> bool:
-        return not self.expanded and self.text.startswith("-") and self.text != "-"
+        # A constant's known value is a flag too (`FLAGS=-fsSL; curl $FLAGS`).
+        value = self.literal if self.expanded else self.text
+        return value is not None and value.startswith("-") and value != "-"
 
 
 @dataclass(frozen=True)
@@ -1209,7 +1211,7 @@ class _Builder:
                 return [[Arg.lit("")]]
             return [[head[n - 1]]]
         if frame is not None and name in frame.locals:
-            return _select(frame.locals[name], index)
+            return _from_variable(_select(frame.locals[name], index))
         values = self._constants.lookup(name, ctx.at(part))
         if values is None:
             return None
@@ -1219,7 +1221,7 @@ class _Builder:
             if chosen is None:
                 return None
             out.extend(chosen)
-        return out
+        return _from_variable(out)
 
     def _bind(self, assign: Node, ctx: _Ctx) -> None:
         """Record an assignment's value in an inlined body's locals."""
@@ -1511,8 +1513,21 @@ def _split(words: list[Arg], line: int) -> list[Arg]:
         if value is None:
             out.append(replace(word, bare=not word.splat, line=origin))
         else:
-            out.extend(Arg.lit(piece, line=origin) for piece in value.split())
+            out.extend(
+                replace(Arg.lit(piece, line=origin), expanded=word.expanded)
+                for piece in value.split()
+            )
     return out
+
+
+def _from_variable(
+    alternatives: list[list[Arg]] | None,
+) -> list[list[Arg]] | None:
+    """A variable's value, still marked as an expansion: knowing what `$DIR`
+    holds does not make `rm -rf "$DIR"` or `eval "$cmd"` literal code."""
+    if alternatives is None:
+        return None
+    return [[replace(a, expanded=True) for a in alt] for alt in alternatives]
 
 
 def _concat(sets: list[frozenset[str] | None]) -> frozenset[str] | None:

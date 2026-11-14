@@ -197,6 +197,19 @@ def test_unquoted_constant_is_word_split() -> None:
     assert "chmod" in _names(model)
 
 
+def test_constant_value_is_still_an_expansion() -> None:
+    model = _model('DIR=/\nrm -rf "$DIR" $DIR')
+    [rm] = _run(model, "rm")
+    assert [(a.literal, a.expanded) for a in rm.args[1:]] == [("/", True)] * 2
+
+
+def test_constant_flag_is_still_a_flag() -> None:
+    model = _model("FLAGS=-fsSL\ncurl $FLAGS -o /tmp/t https://x.example/t")
+    [download] = model.downloads
+    assert download.path is not None and download.path.literal == "/tmp/t"
+    assert [u.literal for u in download.urls] == ["https://x.example/t"]
+
+
 @pytest.mark.parametrize(
     "body",
     [

