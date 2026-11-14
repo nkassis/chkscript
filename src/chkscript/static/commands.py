@@ -169,6 +169,18 @@ class Command:
     def heredocs(self) -> list[Redirect]:
         return [r for r in self.redirects if r.heredoc is not None]
 
+    def stdin_code(self) -> list[tuple[str, int | None]]:
+        """(text, first line) of what a heredoc or a `<<<` here-string feeds
+        to this command's standard input."""
+        out: list[tuple[str, int | None]] = []
+        for r in self.redirects:
+            if r.heredoc is not None:
+                out.append((r.heredoc, r.body_line))
+            elif r.op == "<<<" and r.target is not None:
+                text = r.target.literal
+                out.append((text if text is not None else r.target.text, r.target.line))
+        return out
+
 
 @dataclass(frozen=True)
 class Download:
@@ -929,10 +941,8 @@ class _Builder:
         elif name in ("source", "."):
             files = parse_options(command.args).operands
             if not files or files[0].literal in ("/dev/stdin", "-"):
-                for heredoc in command.heredocs():
-                    self._embed(
-                        heredoc.heredoc or "", heredoc.body_line, command.pos, ctx
-                    )
+                for text, line in command.stdin_code():
+                    self._embed(text, line, command.pos, ctx)
         elif name == "tee":
             for heredoc in command.heredocs():
                 self._record_writes(command, heredoc, _tee_files(command))
@@ -949,8 +959,8 @@ class _Builder:
             text = code.literal if code.literal is not None else code.text
             self._embed(text, code.line or command.line, command.pos, ctx)
         elif not files:
-            for heredoc in command.heredocs():
-                self._embed(heredoc.heredoc or "", heredoc.body_line, command.pos, ctx)
+            for text, line in command.stdin_code():
+                self._embed(text, line or command.line, command.pos, ctx)
 
     def _inline(self, command: Command, name: str, ctx: _Ctx) -> None:
         if name in ctx.inlining or len(ctx.inlining) >= MAX_INLINE_DEPTH:

