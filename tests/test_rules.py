@@ -54,6 +54,8 @@ CASES: list[tuple[str, str, bool]] = [
     ("write-system-auth-file", "echo /tmp/x.so > /etc/ld.so.preload", True),
     ("write-system-auth-file", "cp shadow.bak /etc/shadow", True),
     ("write-system-auth-file", 'echo x | sudo tee "/etc/sudoers.d/$NAME"', True),
+    ("write-system-auth-file", ">/etc/shadow", True),
+    ("write-system-auth-file", "X=1 >/etc/shadow", True),
     ("write-system-auth-file", "grep root /etc/passwd", False),
     ("persistence-append", "echo 'export X=1' >> ~/.bashrc", True),
     ("persistence-append", 'echo "run" >> "$HOME/.zshrc"', True),

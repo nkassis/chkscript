@@ -163,6 +163,20 @@ def test_only_sudo_and_doas_mark_root() -> None:
     assert not _run(_model("env chmod +x f"), "chmod")[0].as_root
 
 
+@pytest.mark.parametrize("body", [">/etc/shadow", "X=1 >/etc/shadow"])
+def test_redirect_without_a_command_word_is_kept(body: str) -> None:
+    [command] = _model(body).commands
+    assert command.argv == []
+    assert command.line == 2
+    [redirect] = command.redirects
+    assert redirect.writes and redirect.target is not None
+    assert redirect.target.literal == "/etc/shadow"
+
+
+def test_assignment_without_redirect_is_not_a_command() -> None:
+    assert _model("X=1").commands == []
+
+
 def test_command_v_runs_nothing() -> None:
     model = _model("command -v curl")
     assert _names(model) == {"command"}

@@ -808,7 +808,8 @@ class _Builder:
         reads_before = ctx.frame.reads if ctx.frame is not None else 0
         redirects = tuple(self._redirect(r, ctx) for r in stmt.get("Redirs") or [])
         cmd = stmt.get("Cmd")
-        if cmd is None:
+        if cmd is None:  # `>/etc/shadow`: only redirects
+            self._redirect_only(stmt, ctx, redirects, reads_before)
             return
         kind = cmd.get("Type")
         if kind == "CallExpr":
@@ -901,6 +902,8 @@ class _Builder:
         if not words:
             for item in call.get("Assigns") or []:
                 self._bind(item, ctx)
+            own = redirects[len(ctx.redirects) :]
+            self._redirect_only(stmt, ctx, own, reads_before)
             return
         line = ctx.line(stmt)
         pos = ctx.at(stmt)
@@ -940,6 +943,35 @@ class _Builder:
                 )
                 self.model.commands.append(command)
                 self._follow(command, ctx)
+
+    def _redirect_only(
+        self,
+        stmt: Node,
+        ctx: _Ctx,
+        redirects: tuple[Redirect, ...],
+        reads_before: int,
+    ) -> None:
+        """A statement with no command word still writes its redirect
+        targets (`>/etc/shadow`, `X=1 >f`): keep it, with an empty argv."""
+        if not any(r.writes for r in redirects):
+            return
+        if ctx.frame is not None and ctx.frame.reads == reads_before:
+            return  # same as the statement at the function's definition
+        line = ctx.line(stmt) if ctx.frame is None else ctx.frame.call_line
+        self.model.commands.append(
+            Command(
+                argv=[],
+                line=line,
+                file=self.model.file,
+                pos=ctx.at(stmt),
+                index=len(self.model.commands),
+                as_root=ctx.as_root,
+                function=ctx.function,
+                redirects=(*ctx.redirects, *redirects),
+                pipeline=ctx.pipeline,
+                stage=ctx.stage,
+            )
+        )
 
     def _positional_builtin(self, words: list[Node], ctx: _Ctx) -> None:
         """Track `shift` and `set --` inside an inlined function body."""
