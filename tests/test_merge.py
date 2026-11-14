@@ -27,12 +27,12 @@ def _finding(
 def test_same_key_merges_and_lists_all_sources() -> None:
     merged = merge(
         [
-            _finding(Severity.UNSAFE, "semgrep"),
+            _finding(Severity.UNSAFE, "shfmt"),
             _finding(Severity.UNSAFE, "regex"),
         ]
     )
     assert len(merged) == 1
-    assert merged[0].merged_from == ["semgrep", "regex"]
+    assert merged[0].merged_from == ["shfmt", "regex"]
 
 
 def test_single_finding_lists_its_own_source() -> None:
@@ -42,7 +42,7 @@ def test_single_finding_lists_its_own_source() -> None:
 
 
 def test_different_line_or_rule_or_file_not_merged() -> None:
-    base = _finding(Severity.UNSAFE, "semgrep")
+    base = _finding(Severity.UNSAFE, "shfmt")
     others = [
         base.model_copy(update={"line": 5}),
         base.model_copy(update={"rule_id": "http-download"}),
@@ -60,16 +60,16 @@ def test_merge_keeps_description_of_most_severe() -> None:
     merged = merge(
         [
             _finding(Severity.WARNING, "llm", description="minor"),
-            _finding(Severity.UNSAFE, "semgrep", description="major"),
+            _finding(Severity.UNSAFE, "shfmt", description="major"),
         ]
     )
     assert merged[0].severity == Severity.UNSAFE
     assert merged[0].description == "major"
-    assert merged[0].merged_from == ["llm", "semgrep"]
+    assert merged[0].merged_from == ["llm", "shfmt"]
 
 
 SEVERITIES = [Severity.WARNING, Severity.UNSAFE]
-SOURCES: list[Source] = ["semgrep", "regex", "llm"]
+SOURCES: list[Source] = ["shfmt", "regex", "llm"]
 
 
 @pytest.mark.parametrize(

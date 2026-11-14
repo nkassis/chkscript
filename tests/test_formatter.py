@@ -120,29 +120,29 @@ def _static_result() -> AnalysisResult:
                 severity=Severity.UNSAFE,
                 description="Piped into a shell",
                 snippet="curl https://x | sh",
-                source="semgrep",
+                source="shfmt",
                 rule_id="curl-pipe-shell",
                 line=4,
-                merged_from=["semgrep", "regex"],
+                merged_from=["shfmt", "regex"],
             ),
             Finding(
                 severity=Severity.WARNING,
-                description="Semgrep could not fully parse this file",
+                description="shfmt could not parse this file",
                 source="chkscript",
-                rule_id="semgrep-parse-error",
+                rule_id="parse-failure",
             ),
         ],
         mode="static-only",
-        static_tools=["shellcheck", "semgrep", "regex"],
+        static_tools=["shellcheck", "shfmt", "regex"],
     )
 
 
 class TestSourceAttribution:
     def test_terminal_shows_sources_rule_and_line(self) -> None:
         output = format_terminal(_static_result())
-        assert "[semgrep+regex curl-pipe-shell]" in output
+        assert "[shfmt+regex curl-pipe-shell]" in output
         assert "(line 4)" in output
-        assert "[chkscript semgrep-parse-error]" in output
+        assert "[chkscript parse-failure]" in output
 
     def test_terminal_tags_llm_finding(self) -> None:
         output = format_terminal(_unsafe_result())
@@ -152,14 +152,48 @@ class TestSourceAttribution:
     def test_json_finding_fields(self) -> None:
         data = json.loads(format_json(_static_result()))
         finding = data["findings"][0]
-        assert finding["source"] == "semgrep"
+        assert finding["source"] == "shfmt"
         assert finding["category"] == "unsafe"
         assert finding["rule_id"] == "curl-pipe-shell"
         assert finding["file"] == "<entry>"
         assert finding["line"] == 4
-        assert finding["merged_from"] == ["semgrep", "regex"]
+        assert finding["merged_from"] == ["shfmt", "regex"]
 
     def test_json_mode_and_static_tools(self) -> None:
         data = json.loads(format_json(_static_result()))
         assert data["mode"] == "static-only"
-        assert data["static_tools"] == ["shellcheck", "semgrep", "regex"]
+        assert data["static_tools"] == ["shellcheck", "shfmt", "regex"]
+        assert data["findings"][0]["generated"] is False
+        assert data["findings"][0]["parent_line"] is None
+
+
+def _generated_result() -> AnalysisResult:
+    return AnalysisResult(
+        summary="Static analysis only.",
+        findings=[
+            Finding(
+                severity=Severity.UNSAFE,
+                description="rm -rf on a variable",
+                snippet='rm -rf "$1"',
+                source="shfmt",
+                rule_id="rm-rf-variable",
+                file="$KILLALL_K3S_SH",
+                line=75,
+                generated=True,
+                parent_line=803,
+            )
+        ],
+        mode="static-only",
+    )
+
+
+class TestGeneratedFiles:
+    def test_terminal_names_the_file_and_the_writing_line(self) -> None:
+        output = format_terminal(_generated_result())
+        assert "($KILLALL_K3S_SH:75, written by line 803)" in output
+
+    def test_json_marks_generated(self) -> None:
+        [finding] = json.loads(format_json(_generated_result()))["findings"]
+        assert finding["file"] == "$KILLALL_K3S_SH"
+        assert finding["generated"] is True
+        assert finding["parent_line"] == 803

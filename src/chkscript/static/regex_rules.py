@@ -1,9 +1,15 @@
-"""Plain-regex version of the Semgrep ruleset, with the same rule ids and messages.
+"""Plain-regex fallback for the syntax-tree rules, with the same ids and messages.
 
-Runs when Semgrep is not on PATH, and on any file Semgrep could not fully parse.
-Matching is per line of `ScriptBundle.rules_text` (backslash continuations
-already joined, the same text Semgrep scans) with comments stripped, so a
-commented-out command never fires and a comment never hides one.
+Runs only when shfmt is missing or too old, or on a file shfmt cannot parse
+(and on embedded code it cannot parse). Matching is per line of
+`ScriptBundle.rules_text` (backslash continuations joined) with comments
+stripped, so a commented-out command never fires and a comment never hides one.
+
+The fallback has no syntax tree, so it over-reports by design: it cannot tell
+a heredoc from a command, a constant from a variable, or which variable a
+function was given. It must report at least every unsafe finding the
+syntax-tree engine reports (tests/test_fallback_superset.py); where the engine
+resolves something the text does not show, a pattern here is widened instead.
 """
 
 from __future__ import annotations
@@ -13,82 +19,70 @@ from typing import NamedTuple
 
 from chkscript.models import Finding, ScriptBundle, Severity
 from chkscript.preprocess import COMMENT
+from chkscript.static.rules.catalog import (
+    AUTH_FILE,
+    HOME,
+    INSECURE_MODE,
+    MESSAGES,
+    RC_FILE,
+    RULE_IDS,
+    SCHEDULER_PATH,
+    SECURITY_SERVICES,
+)
 
 
 class RegexRule(NamedTuple):
     rule_id: str
-    message: str
     pattern: re.Pattern[str]
 
+    @property
+    def message(self) -> str:
+        return MESSAGES[self.rule_id]
 
-_SHELL_STAGE = r"(?<!\|)\|(?!\|)[ \t]*(?:sh|bash|zsh|sudo)\b"
-_HOME = r"(?:~|\$HOME|\$\{HOME\})"
+
+_VAR = r"\$\{?[A-Za-z_]\w*\}?"
+# A word in command position (start of a command, after a wrapper).
+_COMMAND_START = r"(?:^|[;&|({`]|\$\(|\b(?:then|do|else|sudo|env|exec|command)\b)[ \t]*"
+# A variable run as a command: the engine may resolve it to curl or a shell.
+_VAR_COMMAND = rf"{_COMMAND_START}{_VAR}(?=[ \t|;&)]|$)"
+_SHELL_STAGE = rf"(?<!\|)\|(?!\|)[ \t]*(?:(?:sh|bash|zsh|sudo|doas)\b|\"?{_VAR})"
 _WRITE = r"(?:>{1,2}|\btee[ \t]+(?:-a[ \t]+)?)"
-_COPY_TO = r"\b(?:cp|mv|install)[ \t]+[^;&|\n]*[ \t]"
+_COPY_TO = r"\b(?:cp|mv|install|ln)[ \t]+[^;&|\n]*[ \t]"
+_SED_I = r"\bsed[ \t]+-i\S*[ \t]+[^;&|\n]*[ \t]"
+_TARGET = rf"(?:{_WRITE}|{_COPY_TO}|{_SED_I})[ \t]*[\"']?"
 _DECODER = (
     r"(?:\bbase64[ \t]+(?:.*[ \t])?(?:-d|--decode|-D)\b|\bxxd[ \t]+(?:.*[ \t])?-r"
     r"|\bopenssl[ \t]+enc[ \t]+(?:.*[ \t])?-d\b|\bgunzip[ \t]+(?:.*[ \t])?-c\b)"
-)
-_SECURITY_SERVICES = (
-    "apparmor|firewalld|ufw|auditd|fail2ban|iptables|nftables|clamav-daemon"
-    "|clamd|falcon-sensor|osqueryd|wazuh-agent|selinux"
 )
 
 LINE_RULES: tuple[RegexRule, ...] = (
     RegexRule(
         "curl-pipe-shell",
-        "Downloaded content is piped straight into a shell, so whatever the server "
-        "returns runs unreviewed.",
-        re.compile(rf"\b(?:curl|wget)\b.*{_SHELL_STAGE}"),
+        re.compile(rf"(?:\b(?:curl|wget)\b|{_VAR_COMMAND}).*{_SHELL_STAGE}"),
     ),
     RegexRule(
         "eval-dynamic",
-        "eval runs a string built from a variable or command output, which hides "
-        "what actually executes.",
         re.compile(r"(?:^|[;&|({]|\b(?:then|do|else)\b)[ \t]*eval[ \t]+.*[$`]"),
     ),
-    RegexRule(
-        "decode-to-shell",
-        "Decoded or decompressed data is fed to a shell, a common way to hide a "
-        "payload from review.",
-        re.compile(rf"{_DECODER}.*{_SHELL_STAGE}"),
-    ),
-    RegexRule(
-        "write-system-auth-file",
-        "The script writes to a system authentication or loader file, which can "
-        "grant root or hijack every process.",
-        re.compile(
-            rf"(?:{_WRITE}|\b(?:cp|mv|install|ln)[ \t]+[^;&|\n]*[ \t]"
-            r"|\bsed[ \t]+-i\S*[ \t]+[^;&|\n]*[ \t])"
-            r"[ \t]*[\"']?/etc/(?:sudoers|passwd\b|shadow\b|ld\.so\.preload\b)"
-        ),
-    ),
+    RegexRule("decode-to-shell", re.compile(rf"{_DECODER}.*{_SHELL_STAGE}")),
+    RegexRule("write-system-auth-file", re.compile(rf"{_TARGET}{AUTH_FILE}")),
     RegexRule(
         "persistence-append",
-        "The script installs itself to run again later via a shell rc file, "
-        "crontab or systemd unit.",
         re.compile(
-            rf"(?:{_WRITE}[ \t]*[\"']?{_HOME}/\.(?:bashrc|bash_profile|profile|zshrc)\b"
+            rf"{_TARGET}(?:{RC_FILE}|{SCHEDULER_PATH})"
             r"|\|[ \t]*crontab[ \t]+-(?:[ \t]|$)|\bcrontab[ \t]+[^-\s]\S*"
-            rf"|(?:{_WRITE}|{_COPY_TO})[ \t]*[\"']?(?:/etc/cron|/var/spool/cron"
-            rf"|/etc/systemd/|/lib/systemd/|/usr/lib/systemd/|{_HOME}/\.config/systemd/))"
         ),
     ),
     RegexRule(
         "insecure-permissions",
-        "World-writable, setuid/setgid, or root-owned files in a user-writable "
-        "location let other users escalate privileges.",
         re.compile(
-            r"\bchmod[ \t]+(?:-\S+[ \t]+)*"
-            r"(?:0?777|[ugoa]*\+[rwxt]*s[rwxt]*|0?[2467][0-7]{3})(?:[ \t]|$)"
+            rf"\bchmod[ \t]+(?:-\S+[ \t]+)*{INSECURE_MODE}(?:[ \t]|$)"
             r"|\bchown[ \t]+(?:-\S+[ \t]+)*root\S*[ \t]+(?:\S+[ \t]+)*"
-            rf"[\"']?(?:{_HOME}|/tmp)(?:/|[ \t]|[\"']|$)"
+            rf"[\"']?(?:{HOME}|/tmp)(?:/|[ \t]|[\"']|$)"
         ),
     ),
     RegexRule(
         "rm-rf-variable",
-        "rm -rf on a path containing a variable deletes the wrong tree, or /, when "
-        "the variable is empty or attacker-set.",
         re.compile(
             r"\brm(?=(?:[ \t]+-[\w-]+)*[ \t]+(?:-[a-zA-Z]*[rR]|--recursive))"
             r"(?=(?:[ \t]+-[\w-]+)*[ \t]+(?:-[a-zA-Z]*f|--force))"
@@ -97,36 +91,47 @@ LINE_RULES: tuple[RegexRule, ...] = (
     ),
     RegexRule(
         "disable-security",
-        "The script turns off a host security control (SELinux, a firewall, or a "
-        "security service).",
         re.compile(
-            r"\bsetenforce[ \t]+0\b|\bufw[ \t]+disable\b"
-            r"|\bsystemctl[ \t]+(?:--\S+[ \t]+)*disable[ \t]+(?:--\S+[ \t]+)*"
-            rf"(?:{_SECURITY_SERVICES})\b"
+            r"\bsetenforce[ \t]+0\b|\bufw[ \t]+(?:\S+[ \t]+)*disable\b"
+            r"|\bsystemctl[ \t]+(?:\S+[ \t]+)*disable[ \t]+(?:\S+[ \t]+)*"
+            rf"(?:{SECURITY_SERVICES})\b"
         ),
     ),
-    RegexRule(
-        "http-download",
-        "A download over plain http:// can be read or replaced by anyone on the "
-        "network path.",
-        re.compile(r"\b(?:curl|wget)\b.*\bhttp://"),
-    ),
+    RegexRule("http-download", re.compile(r"\b(?:curl|wget)\b.*\bhttp://")),
 )
 
 UNVERIFIED_DOWNLOAD = RegexRule(
     "unverified-download",
-    "An executable is downloaded with no sha256sum, shasum, gpg --verify or cosign "
-    "check anywhere in the script.",
     re.compile(
-        r"\bchmod[ \t]+(?:-\S+[ \t]+)*(?:[ugoa]*\+[rwst]*x|[0-7]*[1357][0-7]*\b)"
+        r"\bchmod[ \t]+(?:-\S+[ \t]+)*(?:[ugoa]*\+[rwst]*x|[0-7]*[1357][0-7]*)"
+        r"(?=[ \t]|$)"
     ),
 )
 _DOWNLOAD = re.compile(r"\b(?:curl|wget)\b")
 _VERIFY = re.compile(r"\bsha256sum\b|\bshasum\b|\bgpg\b.*--verify|\bcosign\b")
-
-RULE_IDS: frozenset[str] = frozenset(
-    rule.rule_id for rule in (*LINE_RULES, UNVERIFIED_DOWNLOAD)
+# A word that may name a file: unquoted, with ${X} normalized to $X.
+_TOKEN = re.compile(r"[^\s\"'()=;|&<>`]+")
+_SUFFIXES = (
+    ".tar.gz",
+    ".tar.xz",
+    ".tar.zst",
+    ".tar.bz2",
+    ".tgz",
+    ".tar",
+    ".zip",
+    ".gz",
+    ".xz",
+    ".zst",
+    ".bz2",
+    ".sha256sum",
+    ".sha256",
+    ".sha512",
+    ".asc",
+    ".sig",
+    ".minisig",
 )
+
+__all__ = ["LINE_RULES", "RULE_IDS", "UNVERIFIED_DOWNLOAD", "matches", "run"]
 
 
 def code_lines(rules_text: str) -> list[tuple[int, str]]:
@@ -137,39 +142,67 @@ def code_lines(rules_text: str) -> list[tuple[int, str]]:
     ]
 
 
-def run(bundle: ScriptBundle) -> list[Finding]:
-    lines = code_lines(bundle.rules_text)
-    findings = [
-        _finding(bundle, rule, number)
+def matches(rules_text: str) -> list[tuple[str, int]]:
+    """(rule id, line) for every rule that fires on the joined text."""
+    lines = code_lines(rules_text)
+    found = [
+        (rule.rule_id, number)
         for number, line in lines
         for rule in LINE_RULES
         if rule.pattern.search(line)
     ]
-    unverified = _unverified_download_line(lines)
-    if unverified is not None:
-        findings.append(_finding(bundle, UNVERIFIED_DOWNLOAD, unverified))
-    return findings
+    found += [(UNVERIFIED_DOWNLOAD.rule_id, n) for n in _unverified_lines(lines)]
+    return found
 
 
-def _unverified_download_line(lines: list[tuple[int, str]]) -> int | None:
-    """Line of the first `chmod +x`, if the script downloads and never verifies."""
+def run(bundle: ScriptBundle) -> list[Finding]:
+    return [
+        _finding(bundle, rule_id, line) for rule_id, line in matches(bundle.rules_text)
+    ]
+
+
+def _names(token: str) -> set[str]:
+    """A path token's names: itself, its basename, both without a suffix."""
+    token = re.sub(r"\$\{(\w+)\}", r"$\1", token).rstrip("/")
+    names: set[str] = set()
+    for name in (token, token.rsplit("/", 1)[-1]):
+        if name in ("", "-", "/dev/null"):
+            continue
+        names.add(name)
+        names.update(name[: -len(s)] for s in _SUFFIXES if name.endswith(s))
+    names.discard("")
+    return names
+
+
+def _unverified_lines(lines: list[tuple[int, str]]) -> list[int]:
+    """Each `chmod +x` line whose files no verifier line names, if the script
+    downloads anything. Per file, like the syntax-tree rule, but by text."""
     if not any(_DOWNLOAD.search(line) for _, line in lines):
-        return None
-    if any(_VERIFY.search(line) for _, line in lines):
-        return None
+        return []
+    verified: set[str] = set()
+    for _, line in lines:
+        if _VERIFY.search(line):
+            for token in _TOKEN.findall(line):
+                verified |= _names(token)
+    found: list[int] = []
     for number, line in lines:
-        if UNVERIFIED_DOWNLOAD.pattern.search(line):
-            return number
-    return None
+        match = UNVERIFIED_DOWNLOAD.pattern.search(line)
+        if match is None:
+            continue
+        rest = re.split(r";|&&|\|\|", line[match.end() :])[0]
+        files = [t for t in _TOKEN.findall(rest) if re.search(r"[\w$]", t)]
+        if not files or any(not (_names(f) & verified) for f in files):
+            found.append(number)
+    return found
 
 
-def _finding(bundle: ScriptBundle, rule: RegexRule, line: int) -> Finding:
+def _finding(bundle: ScriptBundle, rule_id: str, line: int) -> Finding:
     return Finding(
         severity=Severity.UNSAFE,
-        description=rule.message,
+        description=MESSAGES[rule_id],
         snippet=bundle.line_text(line),
         source="regex",
-        rule_id=rule.rule_id,
+        rule_id=rule_id,
         file=bundle.file,
         line=line,
     )

@@ -33,13 +33,21 @@ chkscript --static-only install.sh
 
 ## Setup
 
-`shellcheck` and `semgrep` on `PATH` are recommended. Without them chkscript falls back to its built-in regex rules and says so on stderr.
+`shellcheck` and `shfmt` (v3.14.0 or newer) on `PATH` are recommended. Without shfmt, or with an older one, chkscript falls back to its built-in regex rules, which over-report, and says so on stderr.
 
-| Platform | shellcheck | semgrep |
-|----------|------------|---------|
-| Debian / Ubuntu | `sudo apt install shellcheck` | `uv tool install semgrep` |
-| Arch | `sudo pacman -S shellcheck` | `uv tool install semgrep` |
-| macOS | `brew install shellcheck` | `brew install semgrep` |
+| Platform | shellcheck | shfmt |
+|----------|------------|-------|
+| Debian / Ubuntu | `sudo apt install shellcheck` | `sudo apt install shfmt` if it is v3.14.0 or newer, else the release binary below |
+| Arch | `sudo pacman -S shellcheck` | `sudo pacman -S shfmt` |
+| macOS | `brew install shellcheck` | `brew install shfmt` |
+
+shfmt release binary (Linux x86-64; other platforms are on the same release page), checksum verified before it is installed:
+
+```sh
+curl -fsSLo shfmt https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+echo "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf  shfmt" | sha256sum -c -
+install -m 0755 shfmt ~/.local/bin/shfmt
+```
 
 ## Models
 
@@ -89,6 +97,6 @@ uv sync --group dev
 uv run pytest
 ```
 
-Tests that need `shellcheck` or `semgrep` skip when the tool is missing. Set `CHKSCRIPT_REQUIRE_TOOLS=1` (CI does) to make a missing tool fail the run instead.
+Tests that need `shellcheck` or `shfmt` skip when the tool is missing. Set `CHKSCRIPT_REQUIRE_TOOLS=1` (CI does) to make a missing tool fail the run instead.
 
 `uv run pytest --run-live` also runs the model fixtures in `tests/test_live.py` against a real provider: Ollama by default, or whatever `CHKSCRIPT_MODEL` names. Not run in CI.

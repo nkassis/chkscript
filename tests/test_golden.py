@@ -1,6 +1,6 @@
 """Golden suite: each fixture's max severity and unsafe rule ids, per engine.
 
-"semgrep" is the normal static layer. "regex" hides Semgrep so the regex
+"shfmt" is the normal static layer. "regex" makes shfmt unusable so the regex
 fallback stands in for it; shellcheck runs in both, since the warning tier is
 independent of which engine provides the unsafe tier.
 """
@@ -13,7 +13,7 @@ import pytest
 
 from chkscript.models import Severity
 from chkscript.preprocess import preprocess
-from chkscript.static import StaticResult, run_static, semgrep, shellcheck
+from chkscript.static import StaticResult, run_static, shellcheck, shfmt
 from tests.conftest import require_tool
 
 ROOT = Path(__file__).parent
@@ -25,6 +25,7 @@ GOLDEN: dict[str, tuple[Severity, set[str]]] = {
     "fixtures/curl_pipe_sh.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/eval_variable.sh": (Severity.UNSAFE, {"eval-dynamic"}),
     "fixtures/base64_to_sh.sh": (Severity.UNSAFE, {"decode-to-shell"}),
+    "fixtures/evasion_var_cmd.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/injection_comment.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/unparseable.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/http_download.sh": (Severity.UNSAFE, {"http-download"}),
@@ -36,14 +37,14 @@ GOLDEN: dict[str, tuple[Severity, set[str]]] = {
 
 def _run(path: str, engine: str, monkeypatch: pytest.MonkeyPatch) -> StaticResult:
     require_tool("shellcheck")
-    if engine == "semgrep":
-        require_tool("semgrep")
+    if engine == "shfmt":
+        require_tool("shfmt")
     else:
-        monkeypatch.setattr(semgrep, "available", lambda: False)
+        monkeypatch.setattr(shfmt, "check", lambda: "shfmt disabled for this test.")
     return run_static(preprocess((ROOT / path).read_bytes()))
 
 
-@pytest.mark.parametrize("engine", ["semgrep", "regex"])
+@pytest.mark.parametrize("engine", ["shfmt", "regex"])
 @pytest.mark.parametrize("path", sorted(GOLDEN))
 def test_golden(path: str, engine: str, monkeypatch: pytest.MonkeyPatch) -> None:
     result = _run(path, engine, monkeypatch)
@@ -58,24 +59,24 @@ def test_golden(path: str, engine: str, monkeypatch: pytest.MonkeyPatch) -> None
 def test_unparseable_reports_parse_warning_and_regex_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = _run("fixtures/unparseable.sh", "semgrep", monkeypatch)
+    result = _run("fixtures/unparseable.sh", "shfmt", monkeypatch)
 
-    parse = [f for f in result.findings if f.rule_id == semgrep.PARSE_ERROR_RULE]
+    parse = [f for f in result.findings if f.rule_id == shfmt.PARSE_FAILURE_RULE]
     assert len(parse) == 1
     assert parse[0].severity == Severity.WARNING
     assert parse[0].source == "chkscript"
-    assert parse[0].description == semgrep.PARSE_ERROR_MESSAGE
+    assert parse[0].description == shfmt.PARSE_FAILURE_MESSAGE
 
     pipe = [f for f in result.findings if f.rule_id == "curl-pipe-shell"]
     assert len(pipe) == 1
     assert "regex" in pipe[0].merged_from
-    assert result.tools == ["shellcheck", "semgrep", "regex"]
+    assert result.tools == ["shellcheck", "shfmt", "regex"]
 
 
 def test_injection_comment_does_not_suppress_static_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result = _run("fixtures/injection_comment.sh", "semgrep", monkeypatch)
+    result = _run("fixtures/injection_comment.sh", "shfmt", monkeypatch)
     pipe = [f for f in result.findings if f.rule_id == "curl-pipe-shell"]
     assert [f.severity for f in pipe] == [Severity.UNSAFE]
     assert pipe[0].line == 6
@@ -84,7 +85,7 @@ def test_injection_comment_does_not_suppress_static_finding(
 def test_no_tools_still_reports_with_regex_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(semgrep, "available", lambda: False)
+    monkeypatch.setattr(shfmt, "check", lambda: "shfmt not found on PATH; x.")
     monkeypatch.setattr(shellcheck, "available", lambda: False)
     result = run_static(preprocess((ROOT / "fixtures/curl_pipe_sh.sh").read_bytes()))
 
