@@ -638,9 +638,14 @@ def _uses_positional(body: Node) -> bool:
     return visit(body)
 
 
+_ROOT_WORD = re.compile(r"(?:^|\s)(?:sudo|doas)(?:\s|$)")
+
+
 def _has_root_word(body: Node) -> bool:
+    """Whether `sudo` or `doas` is written in the body as a word, including
+    inside a string (`CMD="sudo $CMD"`)."""
     return any(
-        node.get("Type") == "Lit" and node.get("Value") in ("sudo", "doas")
+        node.get("Type") == "Lit" and _ROOT_WORD.search(node.get("Value", ""))
         for node in _iter_nodes(body)
     )
 

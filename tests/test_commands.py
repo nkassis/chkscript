@@ -502,3 +502,10 @@ def test_path_names_tie_archives_and_checksums() -> None:
 )
 def test_adds_execute(mode: str, executes: bool) -> None:
     assert commands.adds_execute(Arg.lit(mode)) is executes
+
+
+def test_sudo_written_inside_a_string_makes_a_wrapper_root() -> None:
+    # k3d's runAsRoot: `CMD="sudo $CMD"; $CMD`.
+    body = 'run() {\n  local CMD="$*"\n  CMD="sudo $CMD"\n  $CMD\n}\nrun cp a /opt/a'
+    [cp] = [c for c in _run(_model(body), "cp") if c.function == "run"]
+    assert cp.as_root
