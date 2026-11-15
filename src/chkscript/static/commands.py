@@ -154,6 +154,12 @@ class Command:
     redirects: tuple[Redirect, ...] = ()
     pipeline: int | None = None
     stage: int = 0
+    # The environment the command passes on, beyond the exported variables:
+    # `NAME=... cmd` and `env NAME=...` set a name (values None when not
+    # known), `env -u NAME` drops one, and `env -i`, `sudo` and `doas` start
+    # from an empty or reset environment (`clear_env`).
+    env: tuple[tuple[str, frozenset[str] | None], ...] = ()
+    clear_env: bool = False
 
     @property
     def name(self) -> str | None:
@@ -391,12 +397,21 @@ class _Constants:
 
     def __init__(self) -> None:
         self._entries: dict[str, list[tuple[int, tuple[str, ...] | None]]] = {}
+        self._exports: dict[str, int] = {}
 
     def record(self, name: str, pos: int, value: tuple[str, ...] | None) -> None:
         self._entries.setdefault(name, []).append((pos, value))
 
+    def export(self, name: str, pos: int) -> None:
+        self._exports[name] = min(pos, self._exports.get(name, pos))
+
     def assigns(self, name: str) -> bool:
         return name in self._entries
+
+    def exported(self, name: str, pos: int) -> bool:
+        """Whether `name` is exported (outside any function) before `pos`, so
+        a child process started there inherits it."""
+        return name in self._exports and self._exports[name] < pos
 
     def lookup(self, name: str, pos: int) -> list[tuple[str, ...]] | None:
         """The literal values of `name` at byte offset `pos`, or None.
@@ -542,8 +557,14 @@ def _collect_constants(tree: Node) -> _Constants:
                 and id(node) in in_function
                 and "g" not in flags
             )
+            exports = id(node) not in in_function and (
+                variant == "export"
+                or (variant in ("declare", "typeset") and "x" in flags)
+            )
             for item in node.get("Args") or []:
                 name = item.get("Name", {}).get("Value")
+                if name and exports:
+                    constants.export(name, _pos(item))
                 if name and local:
                     mark(name, _pos(item))
                 elif name and "n" in flags:
@@ -748,6 +769,18 @@ class _Frame:
 
 
 @dataclass(frozen=True)
+class _Scope:
+    """An embedded program: its own constants and, when it runs in a child
+    shell (`bash -c`, a heredoc fed to `sh`), what that child inherits. Code
+    run by `source` is in the same shell and sees every variable."""
+
+    constants: _Constants
+    child: bool = False
+    env: dict[str, frozenset[str] | None] = field(default_factory=dict)
+    clear_env: bool = False
+
+
+@dataclass(frozen=True)
 class _Ctx:
     src: bytes
     line_offset: int = 0
@@ -762,9 +795,9 @@ class _Ctx:
     as_root: bool = False
     depth: int = 0
     inlining: tuple[str, ...] = ()
-    # The constants of each embedded program around this code, innermost
-    # last; the entry file's own are the builder's.
-    scopes: tuple[_Constants, ...] = ()
+    # Each embedded program around this code, innermost last; the entry
+    # file's constants are the builder's.
+    scopes: tuple[_Scope, ...] = ()
 
     def line(self, node: Node) -> int:
         return _line(node) + self.line_offset
@@ -881,8 +914,9 @@ class _Builder:
                 continue
             for receiver in self.model.later_stages(sender):
                 if _reads_stdin_as_code(receiver):
+                    child = receiver if receiver.name in SHELLS else None
                     for text, line in sender.stdin_code():
-                        self._embed(text, line, sender.pos, ctx)
+                        self._embed(text, line, sender.pos, ctx, child)
                 elif receiver.name == "tee":
                     for heredoc in sender.heredocs():
                         self._record_writes(receiver, heredoc, _tee_files(receiver))
@@ -914,8 +948,16 @@ class _Builder:
         alternatives = self._expand(words, ctx)
         if ctx.frame is not None and ctx.frame.reads == reads_before:
             return  # same as the command at the function's definition
+        assigned = tuple(
+            (item["Name"]["Value"], self._assigned_values(item, ctx))
+            for item in call.get("Assigns") or []
+            if item.get("Name")
+        )
         for argv in alternatives:
             for resolved, root in _strip_wrappers(argv):
+                env, clear_env = _passed_env(
+                    assigned, argv[: len(argv) - len(resolved)]
+                )
                 command_line = line
                 if ctx.frame is not None:
                     # Inlined: report where the command word was written, so
@@ -940,9 +982,19 @@ class _Builder:
                     redirects=redirects,
                     pipeline=ctx.pipeline,
                     stage=ctx.stage,
+                    env=env,
+                    clear_env=clear_env,
                 )
                 self.model.commands.append(command)
                 self._follow(command, ctx)
+
+    def _assigned_values(self, assign: Node, ctx: _Ctx) -> frozenset[str] | None:
+        """The values of a `NAME=...` prefix assignment, or None if unknown."""
+        if assign.get("Append") or assign.get("Index") or assign.get("Array"):
+            return None
+        if assign.get("Value") is None:
+            return frozenset({""})
+        return self._arg(assign["Value"], ctx).values
 
     def _redirect_only(
         self,
@@ -1012,10 +1064,10 @@ class _Builder:
         code, files = _shell_code(command.args)
         if code is not None:
             text = code.literal if code.literal is not None else code.text
-            self._embed(text, code.line or command.line, command.pos, ctx)
+            self._embed(text, code.line or command.line, command.pos, ctx, command)
         elif not files:
             for text, line in command.stdin_code():
-                self._embed(text, line or command.line, command.pos, ctx)
+                self._embed(text, line or command.line, command.pos, ctx, command)
 
     def _inline(self, command: Command, name: str, ctx: _Ctx) -> None:
         if name in ctx.inlining or len(ctx.inlining) >= MAX_INLINE_DEPTH:
@@ -1068,11 +1120,21 @@ class _Builder:
 
     # embedded code
 
-    def _embed(self, text: str, line: int | None, pos: int, ctx: _Ctx) -> None:
+    def _embed(
+        self,
+        text: str,
+        line: int | None,
+        pos: int,
+        ctx: _Ctx,
+        child: Command | None = None,
+    ) -> None:
         """Parse `text` as code run at `line`, and add its commands.
 
         `pos` is the embedding command's offset in the entry file, so the
         embedded code sees the constants assigned before that command.
+        `child` is the shell command that runs it in a new process, whose
+        environment decides which outer variables the code can see; None
+        for code run in the same shell (`source`).
         """
         first = line if line is not None else 1
         if not text.strip():
@@ -1094,7 +1156,7 @@ class _Builder:
             stage=0,
             redirects=(),
             depth=ctx.depth + 1,
-            scopes=(*ctx.scopes, _collect_constants(tree)),
+            scopes=(*ctx.scopes, _scope(_collect_constants(tree), child)),
         )
         self.walk(tree.get("Stmts") or [], inner)
 
@@ -1293,17 +1355,36 @@ class _Builder:
     def _constant(
         self, name: str, part: Node, ctx: _Ctx
     ) -> list[tuple[str, ...]] | None:
-        """A constant's values: the innermost embedded program that assigns
-        the name answers (at this word, or for an enclosing program, at any
-        point after its first assignment); else the entry file, at the
-        position of the code that embeds this one. Outer values stay visible
-        because the outer shell expands unquoted heredocs and "..." strings
-        before the inner one runs."""
+        """A constant's values, from the innermost program outward.
+
+        A program that assigns the name answers (at this word, or for an
+        enclosing program, at any point after its first assignment). A child
+        shell sees an outer value only if it is passed on the command
+        (`NAME=... bash`, `env NAME=`) or exported before it; otherwise the
+        name is unknown, since a parent's unexported variable never reaches
+        the child. What the outer shell expands (unquoted heredocs, "..."
+        strings) was substituted before the code was parsed.
+        """
         for depth in range(len(ctx.scopes) - 1, -1, -1):
             scope = ctx.scopes[depth]
-            if scope.assigns(name):
+            if scope.constants.assigns(name):
                 innermost = depth == len(ctx.scopes) - 1
-                return scope.lookup(name, _pos(part) if innermost else sys.maxsize)
+                at = _pos(part) if innermost else sys.maxsize
+                return scope.constants.lookup(name, at)
+            if not scope.child:
+                continue  # `source`d: the enclosing shell's variables
+            if name in scope.env:
+                values = scope.env[name]
+                return None if values is None else [(v,) for v in sorted(values)]
+            if scope.clear_env:
+                return None
+            if depth > 0:
+                parent = ctx.scopes[depth - 1].constants
+                exported = parent.exported(name, sys.maxsize)
+            else:
+                exported = self._constants.exported(name, ctx.at(part))
+            if not exported:
+                return None
         return self._constants.lookup(name, ctx.at(part))
 
     def _bind(self, assign: Node, ctx: _Ctx) -> None:
@@ -1347,19 +1428,33 @@ class _Builder:
             parts = hdoc.get("Parts") or []
             if not parts:
                 return Redirect(op, fd, None, "", ctx.line(hdoc), quoted)
-            # Literal parts by value (their spans can run on to the delimiter),
-            # expansions as their source text.
-            body = "".join(
-                p["Value"] if p.get("Type") == "Lit" else ctx.slice(p) for p in parts
-            )
-            if not quoted:
-                body = re.sub(r"\\([$`\\])", r"\1", body)
+            body = "".join(self._heredoc_part(p, quoted, ctx) for p in parts)
             if op == "<<-":
                 body = re.sub(r"(?m)^\t+", "", body)
             return Redirect(op, fd, None, body, ctx.line(hdoc), quoted)
         if word is not None:
             self._substs(word, ctx)
         return Redirect(op, fd, self._arg(word, ctx) if word else None)
+
+    def _heredoc_part(self, part: Node, quoted: bool, ctx: _Ctx) -> str:
+        """One part of a heredoc body as the receiving command reads it.
+
+        Literal parts by value (their spans can run on to the delimiter). In
+        an unquoted body the outer shell expands `$NAME` before the receiver
+        sees it, so a variable with one known one-line value is substituted;
+        any other expansion stays as its source text, and `\\$` is a literal
+        `$` for the receiver to look up.
+        """
+        if part.get("Type") == "Lit":
+            value = part["Value"]
+            return value if quoted else re.sub(r"\\([$`\\])", r"\1", value)
+        if not quoted and part.get("Type") == "ParamExp":
+            values = self._param_values(part, ctx)
+            if values is not None and len(values) == 1:
+                value = next(iter(values))
+                if "\n" not in value:
+                    return value
+        return ctx.slice(part)
 
     # downloads and generated files
 
@@ -1478,6 +1573,59 @@ def _strip_wrappers(argv: list[Arg]) -> list[tuple[list[Arg], bool]]:
         is_root = root or _WRAPPERS[name].root
         todo.extend((rest, is_root, depth + 1) for rest in rests)
     return list(reversed(done))
+
+
+def _scope(constants: _Constants, child: Command | None) -> _Scope:
+    if child is None:
+        return _Scope(constants)
+    return _Scope(
+        constants,
+        child=True,
+        env=dict(child.env),
+        clear_env=child.clear_env or child.as_root,
+    )
+
+
+def _passed_env(
+    assigned: tuple[tuple[str, frozenset[str] | None], ...],
+    wrapper_words: list[Arg],
+) -> tuple[tuple[tuple[str, frozenset[str] | None], ...], bool]:
+    """(names set or dropped, environment cleared) for a command, from its
+    `NAME=...` prefix and the wrapper words stripped before it.
+
+    Reads cautiously: any `-i`-style flag, `-`, or `sudo`/`doas` (which reset
+    the environment) counts as clearing it, and `-u` drops the next word as a
+    name; at worst a child shell's value becomes unknown.
+    """
+    env: dict[str, frozenset[str] | None] = dict(assigned)
+    clear = False
+    i = 0
+    while i < len(wrapper_words):
+        arg = wrapper_words[i]
+        text = arg.literal
+        i += 1
+        if text is None:
+            clear = True  # an unknown wrapper word may be `-i`
+            continue
+        word = posixpath.basename(text)
+        if word in ("sudo", "doas") or text in ("-", "--ignore-environment"):
+            clear = True
+        elif _ASSIGN_WORD.match(text):
+            name, _, value = text.partition("=")
+            env[name] = frozenset({value})
+        elif text.startswith("--unset="):
+            env[text.partition("=")[2]] = None
+        elif text == "--unset" or (text.startswith("-") and not text.startswith("--")):
+            letters = "u" if text == "--unset" else text[1:]
+            clear = clear or "i" in letters
+            if "u" in letters:
+                name = letters[letters.index("u") + 1 :]
+                if not name and i < len(wrapper_words):
+                    name = wrapper_words[i].literal or ""
+                    i += 1
+                if name:
+                    env[name] = None
+    return tuple(env.items()), clear
 
 
 def _shell_code(args: list[Arg]) -> tuple[Arg | None, list[Arg]]:

