@@ -81,12 +81,22 @@ export ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key
 
 When the script will be sent to a non-local endpoint, stderr names the host first. `.env.example` lists every variable.
 
+## Reading the report
+
+Every finding has a category:
+
+- **unsafe**: never legitimate in an installer, such as `curl | sh`, `eval` of downloaded text, an unguarded `rm -rf "$VAR/"`, or a write to `/etc/sudoers`. These come first, each with its line.
+- **capability**: powerful but normal for an installer: running as root, installing a service, writing to `/usr/local`, adding a package repository, a download verified only by TLS. These are listed under "What this script will do to your machine", grouped by kind.
+- **lint**: shellcheck output, folded into a count unless `-v`.
+
+Above that section, the `NEEDS` line sums the script up, for example `root · persistent changes · downloads from 3 hosts`. The section ends by saying what was not found ("No other changes found: no services, ..."). That claim is made only when chkscript could check the whole script. When it couldn't, the line says why instead: reduced coverage, code it could not resolve, or a write to a path it could not resolve. `--json` has the same data, in `category` and `group` on each finding and in a top-level `footprint`.
+
 ## Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Safe |
-| 1 | Warnings only |
+| 1 | Warnings only (capability or lint findings) |
 | 2 | Unsafe |
 | 3 | Error |
 
@@ -98,5 +108,7 @@ uv run pytest
 ```
 
 Tests that need `shellcheck` or `shfmt` skip when the tool is missing. Set `CHKSCRIPT_REQUIRE_TOOLS=1` (CI does) to make a missing tool fail the run instead.
+
+`tests/test_snapshots.py` compares the terminal report for two corpus installers against `tests/snapshots/`. After an intended change to the report, regenerate them with `CHKSCRIPT_UPDATE_SNAPSHOTS=1 uv run pytest tests/test_snapshots.py` and review the diff.
 
 `uv run pytest --run-live` also runs the model fixtures in `tests/test_live.py` against a real provider: Ollama by default, or whatever `CHKSCRIPT_MODEL` names. Not run in CI.

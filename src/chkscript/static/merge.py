@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from chkscript.models import Finding, Source
+from chkscript.models import CATEGORY_RANK, Finding, Source
 
 _Key = tuple[str, int | None, str]
 
@@ -17,7 +17,8 @@ def merge(findings: Iterable[Finding]) -> list[Finding]:
     """Collapse findings sharing `(file, line, rule_id)` into one.
 
     The merged finding takes the description of the most severe input (the first
-    one on a tie), the highest severity, and every source in `merged_from`.
+    one on a tie), the highest severity, the most severe category, and every
+    source in `merged_from`; a capability's group, label and subject are kept.
     Findings with no `rule_id` (free-form model findings) are never merged.
     Order of first appearance is kept.
     """
@@ -37,10 +38,18 @@ def merge(findings: Iterable[Finding]) -> list[Finding]:
         winner = finding if finding.severity > existing.severity else existing
         combined = list(existing.merged_from)
         combined += [s for s in sources if s not in combined]
+        category = max(
+            (existing.category, finding.category), key=CATEGORY_RANK.__getitem__
+        )
         merged[index[key]] = winner.model_copy(
             update={
                 "severity": max(existing.severity, finding.severity),
+                "category": category,
                 "merged_from": combined,
+                # A capability's group, label and subject survive a raise.
+                "group": existing.group or finding.group,
+                "label": existing.label or finding.label,
+                "subject": existing.subject or finding.subject,
             }
         )
     return merged

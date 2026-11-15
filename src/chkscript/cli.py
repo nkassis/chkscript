@@ -6,7 +6,7 @@ import logging
 import sys
 from typing import NoReturn
 
-from chkscript import redact
+from chkscript import footprint, redact
 from chkscript.analyzer import (
     AnalysisError,
     FloorViolationError,
@@ -224,6 +224,12 @@ def _run() -> NoReturn:
         result = _static_report(static, [])
     else:
         result = _run_llm(bundle, static, model)
+
+    # From the merged findings, never the model: it holds in --static-only.
+    summary = footprint.compute(
+        result.findings, static.hosts, static.coverage_full, static.unresolved_writes
+    )
+    result = result.model_copy(update={"footprint": summary})
 
     # Masking is always on: a snippet must not echo a credential into logs.
     result = redact.mask_result(result, bundle.secrets)

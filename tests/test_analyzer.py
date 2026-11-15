@@ -75,6 +75,9 @@ def _static() -> list[Finding]:
             source="shfmt",
             rule_id="unverified-download",
             line=5,
+            group="download",
+            label="Downloads binaries verified only by TLS",
+            subject="tool",
         ),
     ]
 
@@ -412,6 +415,12 @@ class TestFloor:
         assert raised.merged_from == ["shfmt", "llm"]
         assert raised.description == "Host does not belong to the project"
         assert len(merged) == 3
+        # A raised capability keeps its group, so the footprint still counts it.
+        assert (raised.group, raised.label, raised.subject) == (
+            "download",
+            "Downloads binaries verified only by TLS",
+            "tool",
+        )
 
     def test_check_floor_raises_on_dropped_finding(self) -> None:
         static = _static()

@@ -502,3 +502,101 @@ def test_path_names_tie_archives_and_checksums() -> None:
 )
 def test_adds_execute(mode: str, executes: bool) -> None:
     assert commands.adds_execute(Arg.lit(mode)) is executes
+
+
+# --- capability tier: quoting, fetched words, hints, root checks -----------
+
+
+def _arg(model: CommandModel, name: str, index: int = 1) -> Arg:
+    [command] = _run(model, name)
+    return command.argv[index]
+
+
+@pytest.mark.parametrize(
+    ("body", "unquoted"),
+    [
+        ('rm "$DIR"', False),
+        ("rm ${PREFIX}/lib", True),
+        ('rm "$DIR/"*', False),
+        ("rm $DIR", True),
+        # The value's own quoting does not matter; the use's does.
+        ('x=$(mktemp -d)\nrm "$x"', False),
+        ('f() { rm -rf "$1"; }\nf ${DIR}', False),
+    ],
+)
+def test_unquoted_is_where_the_word_is_used(body: str, unquoted: bool) -> None:
+    # The last rm: for a function, the one inlined at the call.
+    arg = _run(_model(body), "rm")[-1].argv[-1]
+    assert (arg.unquoted or arg.bare) is unquoted
+
+
+@pytest.mark.parametrize(
+    ("body", "fetched"),
+    [
+        ('echo "$(curl -fsSL https://x.example/i)"', True),
+        ("echo `wget -qO- https://x.example/i`", True),
+        ('x=$(curl https://x.example/i)\necho "$x"', True),
+        ('x=$(curl https://x.example/i)\ny=$x\necho "$y"', True),
+        ('echo "$(uname -s)"', False),
+        ('echo "$INSTALL_K3S_EXEC"', False),
+    ],
+)
+def test_fetched_marks_curl_output(body: str, fetched: bool) -> None:
+    [echo] = [c for c in _run(_model(body), "echo") if c.args]
+    assert echo.args[0].fetched is fetched
+
+
+@pytest.mark.parametrize(
+    ("body", "hint"),
+    [
+        (': "${DIR:=/usr/local/bin}"\ncp t "$DIR/t"', "/usr/local/bin/t"),
+        ('DIR="${DIR:-/opt/x}"\ncp t "$DIR/t"', "/opt/x/t"),
+        (
+            'if [ -n "$X" ]; then D=$X; else D=/usr/local/bin; fi\ncp t "$D/t"',
+            "/usr/local/bin/t",
+        ),
+        ('B=/opt/bin\nF="${F:-${B}/k}"\ncp t "$F"', "/opt/bin/k"),
+        ("for PM in dnf yum; do :; done\ncp t /x/$PM", "/x/dnf"),
+        ('T=$(mktemp -d)\ncp t "$T/t"', f"{commands.MKTEMP_HINT}/t"),
+        (
+            'U="https://get.example.com/$(uname)/x"\ncp t "$U"',
+            "https://get.example.com/$(?)/x",
+        ),
+    ],
+)
+def test_hints_for_unknown_words(body: str, hint: str) -> None:
+    arg = _arg(_model(body), "cp", -1)
+    assert arg.values is None
+    assert hint in (arg.hints or ())
+    assert hint in arg.possible()
+    assert hint not in arg.candidates()  # hints never stand in for values
+
+
+def test_a_variable_with_no_known_part_has_no_hint() -> None:
+    arg = _arg(_model('P="$(detect)"\ncp t "$P"'), "cp", -1)
+    assert arg.hints is None
+
+
+def test_a_hint_cycle_terminates() -> None:
+    arg = _arg(_model('A="$B/x"\nB="$A/y"\ncp t "$A"'), "cp", -1)
+    assert arg.values is None
+
+
+@pytest.mark.parametrize(
+    ("body", "lines"),
+    [
+        ('if [ "$(id -u)" -ne 0 ]; then\n  echo root\n  exit 1\nfi', [2]),
+        ('[ "$EUID" -eq 0 ] || exit 1', [2]),
+        ('[ "$(whoami)" = root ] || { echo no; exit 1; }', [2]),
+        ('if [ "$(id -u)" -eq 0 ]; then SUDO=; else SUDO=sudo; fi', []),
+        ('[ "$EUID" -eq 0 ] && echo root', []),
+    ],
+)
+def test_root_checks_that_gate_the_script(body: str, lines: list[int]) -> None:
+    assert _model(body).root_checks == lines
+
+
+def test_sudo_written_inside_a_string_makes_a_wrapper_root() -> None:
+    body = 'run() {\n  local CMD="$*"\n  CMD="sudo $CMD"\n  $CMD\n}\nrun cp a /opt/a'
+    [cp] = [c for c in _run(_model(body), "cp") if c.function == "run"]
+    assert cp.as_root

@@ -11,6 +11,11 @@ from chkscript.static.commands import COPIERS, Arg, Command, parse_options
 class Hit(NamedTuple):
     rule_id: str
     line: int
+    # Picks a message and report label (`package-repo-added`'s key scope,
+    # `persistence-append`'s kind); see catalog.VARIANT_MESSAGES and LABELS.
+    variant: str | None = None
+    # What the finding acts on, for the report: a unit name, a path, a group.
+    subject: str | None = None
 
 
 _COPY_SHORT_VALUE = "mogStT"
@@ -51,7 +56,12 @@ def _after(arg: Arg, prefix: str) -> Arg:
 
 
 def matches(arg: Arg, pattern: re.Pattern[str]) -> bool:
-    """Whether any value of `arg` (or its text, when unknown) starts with
-    `pattern`. A partly known word such as `/etc/sudoers.d/$NAME` still
-    matches on its literal prefix."""
-    return any(pattern.match(candidate) for candidate in arg.candidates())
+    """Whether any value of `arg` (or its text, when unknown, or a hinted
+    value) starts with `pattern`. A partly known word such as
+    `/etc/sudoers.d/$NAME` still matches on its literal prefix."""
+    return any(pattern.match(candidate) for candidate in arg.possible())
+
+
+def matching(arg: Arg, pattern: re.Pattern[str]) -> str | None:
+    """The first value (or text, or hint) of `arg` that `matches` matched."""
+    return next((c for c in arg.possible() if pattern.match(c)), None)

@@ -17,6 +17,7 @@ from chkscript.cli import main
 from chkscript.config import DEFAULT_HOSTED_MODEL, DEFAULT_LOCAL_MODEL
 from chkscript.models import LLMFinding, LLMResult, Severity
 from chkscript.static import StaticResult
+from tests.conftest import require_tool
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -698,7 +699,47 @@ class TestHardcodedSecret:
             ],
         )
         _use_model(mocker, _model_returning(reply))
-        _run(monkeypatch, *fmt, str(FIXTURES / "hardcoded_token.sh"))
+        # -v: the terminal names a capability's rule id only in verbose mode.
+        _run(monkeypatch, "-v", *fmt, str(FIXTURES / "hardcoded_token.sh"))
         captured = capsys.readouterr()
         assert GITHUB_TOKEN not in captured.out + captured.err
         assert "llm.[SECRET-1:github-token]" in captured.out
+
+
+class TestCapabilityTier:
+    def test_capability_only_script_exits_1(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        require_tool("shfmt")
+        code = _run(monkeypatch, "--static-only", str(FIXTURES / "docker_group.sh"))
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "UNSAFE" not in out
+        assert "Adds a user to a root-equivalent group: docker (line 6)" in out
+        assert "NEEDS   root · no persistent changes · no downloads" in out
+
+    def test_static_only_json_has_the_footprint(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        require_tool("shfmt")
+        fixture = str(FIXTURES / "binary_no_checksum.sh")
+        assert _run(monkeypatch, "--static-only", "--json", fixture) == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["footprint"]["privilege"] == "root"
+        assert data["footprint"]["network_hosts"] == ["releases.example.com"]
+        assert data["footprint"]["coverage"] == "full"
+        groups = {f["rule_id"]: f["group"] for f in data["findings"] if f["group"]}
+        assert groups == {
+            "unverified-download": "download",
+            "runs-as-root": "root",
+            "system-path-write": "system-write",
+        }
+
+    def test_regex_fallback_says_coverage_reduced(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr("chkscript.static.shfmt.check", lambda: "no shfmt.")
+        _run(monkeypatch, "--static-only", str(FIXTURES / "docker_group.sh"))
+        out = capsys.readouterr().out
+        assert "  Not checked: static coverage reduced" in out
+        assert "root · persistence not ruled out" in out

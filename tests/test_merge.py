@@ -87,3 +87,47 @@ def test_merge_never_lowers_severity(
     assert merged[0].severity == max(f.severity for f in findings)
     for original in findings:
         assert merged[0].severity >= original.severity
+
+
+def test_merged_category_is_the_most_severe() -> None:
+    capability = Finding(
+        severity=Severity.WARNING,
+        category="capability",
+        source="shfmt",
+        rule_id="persistence-append",
+        line=4,
+        description="d",
+        group="persistence",
+        label="Installs a systemd service",
+        subject="x.service",
+    )
+    raised = capability.model_copy(
+        update={
+            "severity": Severity.UNSAFE,
+            "category": "unsafe",
+            "source": "llm",
+            "group": None,
+            "label": None,
+            "subject": None,
+        }
+    )
+    for order in ([capability, raised], [raised, capability]):
+        [merged] = merge(order)
+        assert merged.category == "unsafe"
+        assert merged.severity == Severity.UNSAFE
+        assert (merged.group, merged.label, merged.subject) == (
+            "persistence",
+            "Installs a systemd service",
+            "x.service",
+        )
+
+
+def test_lint_merged_with_capability_is_a_capability() -> None:
+    lint = _finding(Severity.WARNING, "shellcheck").model_copy(
+        update={"category": "lint"}
+    )
+    capability = _finding(Severity.WARNING, "shfmt").model_copy(
+        update={"category": "capability"}
+    )
+    [merged] = merge([lint, capability])
+    assert merged.category == "capability"

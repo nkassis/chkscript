@@ -84,7 +84,10 @@ class Arg:
     can be, or None when unknown. A `splat` stands for an unknown number of
     words, such as `"$@"` with unknown positional parameters. A `bare` word
     is a lone unquoted expansion (`$SUDO`): taken as one word, but in command
-    position it may also be empty or a wrapper.
+    position it may also be empty or a wrapper. `unquoted` is set when an
+    expansion in the word is outside double quotes (`${PREFIX}/lib`), and
+    `fetched` when the word holds the output of curl or wget: a `$(curl ...)`
+    or a variable assigned from one.
     """
 
     text: str
@@ -92,7 +95,14 @@ class Arg:
     expanded: bool = False
     splat: bool = False
     bare: bool = False
+    unquoted: bool = False
+    fetched: bool = False
     line: int | None = field(default=None, compare=False)
+    # For an unknown word: values it takes when its variables hold one of
+    # the literals the script assigns them, or a `${X:=default}` default.
+    # Not proof of anything; capability rules match them so that
+    # `${K3D_INSTALL_DIR:=/usr/local/bin}` still counts as a system path.
+    hints: frozenset[str] | None = field(default=None, compare=False)
 
     @classmethod
     def lit(cls, value: str, line: int | None = None) -> Arg:
@@ -108,6 +118,10 @@ class Arg:
     def candidates(self) -> list[str]:
         """The values when known, else the text: what rules match against."""
         return sorted(self.values) if self.values is not None else [self.text]
+
+    def possible(self) -> list[str]:
+        """The candidates, plus the hinted values of an unknown word."""
+        return [*self.candidates(), *sorted(self.hints or ())]
 
     @property
     def is_flag(self) -> bool:
@@ -231,6 +245,9 @@ class CommandModel:
     downloads: list[Download] = field(default_factory=list)
     generated: list[GeneratedFile] = field(default_factory=list)
     unparsed: list[Snippet] = field(default_factory=list)
+    # Lines of a check that the script runs as root (`id -u`, `$EUID`, `$UID`)
+    # that leads to `exit`: the script refuses to go on unless it is root.
+    root_checks: list[int] = field(default_factory=list)
 
     def later_stages(self, command: Command) -> list[Command]:
         """Commands in later stages of `command`'s pipeline."""
@@ -398,6 +415,10 @@ class _Constants:
     def __init__(self) -> None:
         self._entries: dict[str, list[tuple[int, tuple[str, ...] | None]]] = {}
         self._exports: dict[str, int] = {}
+        # For Arg.hints: every value word assigned to a name, and the literal
+        # defaults of `${NAME:=x}` / `${NAME:-x}`, wherever they appear.
+        self.hint_words: dict[str, list[Node]] = {}
+        self.defaults: dict[str, set[str]] = {}
 
     def record(self, name: str, pos: int, value: tuple[str, ...] | None) -> None:
         self._entries.setdefault(name, []).append((pos, value))
@@ -492,6 +513,52 @@ def _literal_word(word: Node | None) -> str | None:
     return "".join(out)
 
 
+# What `$(mktemp ...)` is taken to be for hints: a fresh private path. Not
+# `/tmp/...`: a `mktemp -d` directory is 0700, not the shared, user-writable
+# /tmp that insecure-permissions looks for. The hint only says "temporary",
+# so a write there is not a write to an unknown place.
+MKTEMP_HINT = "(mktemp)"
+_MAX_PART_HINTS = 4
+
+
+def _runs_mktemp(subst: Node) -> bool:
+    """`$(mktemp ...)`, also through a one-word wrapper (`$(ensure mktemp)`)."""
+    stmts = subst.get("Stmts") or []
+    if len(stmts) != 1 or (stmts[0].get("Cmd") or {}).get("Type") != "CallExpr":
+        return False
+    words = [_literal_word(w) for w in stmts[0]["Cmd"].get("Args") or []][:2]
+    return "mktemp" in words
+
+
+_ROOT_PARAMS = frozenset({"EUID", "UID"})
+
+
+def _is_root_probe(node: object) -> bool:
+    """Whether `node` reads who the script runs as: `$(id -u)`, `$(whoami)`,
+    `$EUID` or `$UID`."""
+    for n in _iter_nodes(node):
+        kind = n.get("Type")
+        if kind == "ParamExp" and (n.get("Param") or {}).get("Value") in _ROOT_PARAMS:
+            return True
+        if kind == "CallExpr":
+            words = [_literal_word(w) for w in n.get("Args") or []]
+            if words[:1] == ["whoami"]:
+                return True
+            if words[:1] == ["id"] and any(
+                w and w.startswith("-") and "u" in w for w in words[1:]
+            ):
+                return True
+    return False
+
+
+def _runs_exit(node: object) -> bool:
+    return any(
+        n.get("Type") == "CallExpr"
+        and [_literal_word(w) for w in (n.get("Args") or [])[:1]] == ["exit"]
+        for n in _iter_nodes(node)
+    )
+
+
 def _iter_nodes(node: object) -> Iterator[Node]:
     if isinstance(node, dict):
         yield node
@@ -527,6 +594,8 @@ def _collect_constants(tree: Node) -> _Constants:
         else:
             value = _literal_word(node.get("Value"))
             constants.record(name, pos, None if value is None else (value,))
+            if node.get("Value") is not None:
+                constants.hint_words.setdefault(name, []).append(node["Value"])
 
     in_function = {
         id(inner)
@@ -578,10 +647,23 @@ def _collect_constants(tree: Node) -> _Constants:
             loop = node.get("Loop", {})
             if loop.get("Type") == "WordIter":
                 mark(loop["Name"]["Value"], _pos(node))
+                # `for PM in dnf yum apt-get`: each literal item is a hint.
+                for item in loop.get("Items") or []:
+                    value = _literal_word(item)
+                    if value:
+                        constants.defaults.setdefault(loop["Name"]["Value"], set()).add(
+                            value
+                        )
         elif kind == "ParamExp":
             exp = node.get("Exp")
             if exp and exp.get("Op") in (":=", "="):
                 mark(node["Param"]["Value"], _pos(node))
+            if exp and exp.get("Op") in (":=", "=", ":-", "-"):
+                default = _literal_word(exp.get("Word"))
+                if default:
+                    constants.defaults.setdefault(node["Param"]["Value"], set()).add(
+                        default
+                    )
         elif kind in ("BinaryArithm", "UnaryArithm"):
             op = node.get("Op")
             if (kind == "BinaryArithm" and op in _ARITH_ASSIGN) or op in ("++", "--"):
@@ -638,9 +720,14 @@ def _uses_positional(body: Node) -> bool:
     return visit(body)
 
 
+_ROOT_WORD = re.compile(r"(?:^|\s)(?:sudo|doas)(?:\s|$)")
+
+
 def _has_root_word(body: Node) -> bool:
+    """Whether `sudo` or `doas` is written in the body as a word, including
+    inside a string (`CMD="sudo $CMD"`)."""
     return any(
-        node.get("Type") == "Lit" and node.get("Value") in ("sudo", "doas")
+        node.get("Type") == "Lit" and _ROOT_WORD.search(node.get("Value", ""))
         for node in _iter_nodes(body)
     )
 
@@ -829,6 +916,12 @@ class _Builder:
         }
         self._pipelines = itertools.count()
         self._writes: list[_Write] = []
+        # Command substitutions (by node id) that run curl or wget, and the
+        # variables assigned from one: what `eval-remote` looks for.
+        self._fetching_substs: set[int] = set()
+        self._fetching_vars: set[str] = set()
+        self._hints: dict[str, frozenset[str] | None] = {}
+        self._hinting: set[str] = set()
         self.model = CommandModel(file=file)
 
     # statements
@@ -853,6 +946,8 @@ class _Builder:
             if cmd["Op"] in ("|", "|&"):
                 self._pipeline(stmt, inner)
             else:
+                if _is_root_probe(cmd["X"]) and _runs_exit(cmd["Y"]):
+                    self.model.root_checks.append(ctx.line(stmt))
                 self._stmt(cmd["X"], inner)
                 self._stmt(cmd["Y"], inner)
         elif kind in ("Block", "Subshell"):
@@ -891,6 +986,11 @@ class _Builder:
             self._substs(cmd, inner)
 
     def _if(self, clause: Node, ctx: _Ctx) -> None:
+        cond = clause.get("Cond") or []
+        if _is_root_probe(cond) and (
+            _runs_exit(clause.get("Then")) or _runs_exit(clause.get("Else"))
+        ):
+            self.model.root_checks.append(ctx.line(cond[0]))
         self.walk(clause.get("Cond") or [], ctx)
         self.walk(clause.get("Then") or [], ctx)
         if clause.get("Else"):
@@ -1172,11 +1272,97 @@ class _Builder:
             return
         if node.get("Type") in ("CmdSubst", "ProcSubst"):
             inner = replace(ctx, pipeline=None, stage=0, redirects=())
+            first = len(self.model.commands)
             self.walk(node.get("Stmts") or [], inner)
+            if any(c.name in DOWNLOADERS for c in self.model.commands[first:]):
+                self._fetching_substs.add(id(node))
             return
         for value in node.values():
             if isinstance(value, dict | list):
                 self._substs(value, ctx)
+
+    def _fetches(self, node: object) -> bool:
+        """Whether `node` holds a `$(curl ...)`, or a variable assigned from
+        one, anywhere in its parts."""
+        if isinstance(node, list):
+            return any(self._fetches(item) for item in node)
+        if not isinstance(node, dict):
+            return False
+        kind = node.get("Type")
+        if kind in ("CmdSubst", "ProcSubst"):
+            return id(node) in self._fetching_substs
+        if kind == "ParamExp" and node.get("Param"):
+            if node["Param"].get("Value") in self._fetching_vars:
+                return True
+        return any(
+            self._fetches(v) for v in node.values() if isinstance(v, dict | list)
+        )
+
+    def _hint(self, name: str, depth: int) -> frozenset[str] | None:
+        """Values a variable may take: its literal assignments, its
+        defaults, and the hints of its other assignments."""
+        if name in self._hints:
+            return self._hints[name]
+        if name in self._hinting or depth >= MAX_EMBED_DEPTH:
+            # A cycle, or too deep: nothing, and nothing cached, since the
+            # same name may resolve fully when asked from nearer the top.
+            return frozenset(self._constants.defaults.get(name, ())) or None
+        self._hinting.add(name)
+        values: set[str] = set(self._constants.defaults.get(name, ()))
+        for word in self._constants.hint_words.get(name, []):
+            values |= self._word_hints(word, depth + 1) or set()
+        self._hinting.discard(name)
+        result = frozenset(sorted(values)[:MAX_VALUES]) if values else None
+        if depth == 0:
+            self._hints[name] = result
+        return result
+
+    def _word_hints(self, word: Node | None, depth: int) -> frozenset[str] | None:
+        """A word's hinted values. A part with no hint keeps its source text
+        (`https://github.com/$TAG/k3d`), so a known prefix still shows; None
+        when no part is known."""
+        if word is None:
+            return None
+        parts = [self._part_hints(p, depth) for p in word.get("Parts") or []]
+        values, hinted = _combine_hints(parts)
+        return values if hinted else None
+
+    def _part_hints(self, part: Node, depth: int) -> _PartHints:
+        """One part's hinted values, whether any is known (a literal or a
+        hint), and the placeholder that stands for it when it has none."""
+        kind = part.get("Type")
+        if kind == "Lit":
+            text = _unescape(part.get("Value", ""), quoted=False)
+            return frozenset({text}), True, text
+        if kind == "SglQuoted":
+            text = part.get("Value", "")
+            return frozenset({text}), True, text
+        if kind == "DblQuoted":
+            inner = [self._part_hints(p, depth) for p in part.get("Parts") or []]
+            values, hinted = _combine_hints(inner)
+            return values, hinted, "".join(ph for _, _, ph in inner)
+        if kind == "ParamExp" and part.get("Param"):
+            name = part["Param"]["Value"]
+            placeholder = f"${name}"
+            found = set(self._hint(name, depth) or ())
+            exp = part.get("Exp")
+            if exp and exp.get("Op") in (":=", "=", ":-", "-"):
+                # `${X:-${BIN_DIR}/k3s-killall.sh}`: the default's own hints.
+                if depth < MAX_EMBED_DEPTH:
+                    found |= self._word_hints(exp.get("Word"), depth + 1) or set()
+            elif not _plain(part):
+                found = set()
+            if found:
+                return frozenset(found), True, placeholder
+            return frozenset({placeholder}), False, placeholder
+        if kind == "CmdSubst" and _runs_mktemp(part):
+            return frozenset({MKTEMP_HINT}), True, MKTEMP_HINT
+        return frozenset({"$(?)"}), False, "$(?)"
+
+    def _note_fetching(self, assign: Node) -> None:
+        name = assign.get("Name", {}).get("Value")
+        if name and self._fetches(assign.get("Value")):
+            self._fetching_vars.add(name)
 
     def _expand(self, words: list[Node], ctx: _Ctx) -> list[list[Arg]]:
         per_word = [self._word_alternatives(w, ctx) for w in words]
@@ -1222,7 +1408,14 @@ class _Builder:
                     unknown = _unknown_word(_param_text(part))
                     if not _is_splat(part):
                         unknown = replace(unknown, splat=False, bare=True)
-                    return [[replace(unknown, line=line)]]
+                    unknown = replace(
+                        unknown,
+                        line=line,
+                        unquoted=True,
+                        fetched=self._fetches(part),
+                        hints=self._word_hints(word, 0),
+                    )
+                    return [[unknown]]
                 return [_split(alt, line) for alt in words]
             if part.get("Type") == "DblQuoted":
                 inner = part.get("Parts") or []
@@ -1230,7 +1423,11 @@ class _Builder:
                     words = self._lookup(inner[0], ctx)
                     if words is not None and all(len(alt) == 1 for alt in words):
                         if len(words) == 1:
-                            return [[replace(words[0][0], line=line)]]
+                            # Quoted here, whatever the value's own quoting.
+                            quoted = replace(
+                                words[0][0], line=line, unquoted=False, bare=False
+                            )
+                            return [[quoted]]
                 if len(inner) == 1 and _is_splat(inner[0]):
                     words = self._lookup(inner[0], ctx)
                     if words is None:
@@ -1250,16 +1447,23 @@ class _Builder:
         texts: list[str] = []
         value_sets: list[frozenset[str] | None] = []
         expanded = False
+        unquoted = False
         for i, part in enumerate(word.get("Parts") or []):
             text, values, exp = self._part(part, ctx, quoted=False, first=i == 0)
             texts.append(text)
             value_sets.append(values)
             expanded = expanded or exp
+            quoting = part.get("Type") in ("Lit", "SglQuoted", "DblQuoted")
+            unquoted = unquoted or (exp and not quoting)
+        values = _concat(value_sets)
         return Arg(
             "".join(texts),
-            _concat(value_sets),
+            values,
             expanded=expanded,
+            unquoted=unquoted,
+            fetched=self._fetches(word),
             line=ctx.line(word),
+            hints=self._word_hints(word, 0) if values is None else None,
         )
 
     def _part(
@@ -1389,6 +1593,7 @@ class _Builder:
 
     def _bind(self, assign: Node, ctx: _Ctx) -> None:
         """Record an assignment's value in an inlined body's locals."""
+        self._note_fetching(assign)
         frame = ctx.frame
         name = assign.get("Name", {}).get("Value")
         if frame is None or not name:
@@ -1752,7 +1957,7 @@ def _split(words: list[Arg], line: int) -> list[Arg]:
         value = word.literal
         origin = word.line if word.line is not None else line
         if value is None:
-            out.append(replace(word, bare=not word.splat, line=origin))
+            out.append(replace(word, bare=not word.splat, unquoted=True, line=origin))
         else:
             out.extend(
                 replace(Arg.lit(piece, line=origin), expanded=word.expanded)
@@ -1769,6 +1974,28 @@ def _from_variable(
     if alternatives is None:
         return None
     return [[replace(a, expanded=True) for a in alt] for alt in alternatives]
+
+
+# A part of a word for Arg.hints: values, whether any is known, placeholder.
+_PartHints = tuple[frozenset[str], bool, str]
+
+
+def _combine_hints(parts: list[_PartHints]) -> tuple[frozenset[str], bool]:
+    """Concatenate parts' hinted values. When that is too many, a part with
+    more than a few values stands as its placeholder instead, so a known
+    prefix (`https://`) or marker (`signed-by=`) survives the product."""
+    hinted = any(known for _, known, _ in parts)
+    joined = _concat([values for values, _, _ in parts])
+    if joined is not None:
+        return joined, hinted
+    narrowed = [
+        values if len(values) <= _MAX_PART_HINTS else frozenset({placeholder})
+        for values, _, placeholder in parts
+    ]
+    joined = _concat(narrowed)
+    if joined is not None:
+        return joined, hinted
+    return frozenset({"".join(p for _, _, p in parts)}), hinted
 
 
 def _concat(sets: list[frozenset[str] | None]) -> frozenset[str] | None:
