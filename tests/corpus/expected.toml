@@ -4,48 +4,107 @@
 # change is judged against. When a rule change moves a result, update the entry
 # and say why in the PR.
 #
-# Per installer: `max_severity` (or `shfmt_max_severity` / `regex_max_severity`
-# when the engines differ), and one [[<name>.finding]] per rule that fires:
-#   rule     static rule id (syntax-tree/regex rule, shellcheck SC code, or a
-#            chkscript coverage warning)
-#   verdict  "true-positive": the matched code runs, during install or later
-#            from a generated file the installer writes, and does what the
-#            rule describes.
-#            "noise": the match is on text that never runs during install (a
-#            heredoc message), a wrong span, a lint that is not a safety
-#            concern, or a benign idiom the rule was not written for.
-#   note     one line; mktemp cleanups say "mktemp cleanup" so they can be counted
-#   lines    unsafe-tier rules only: the exact lines that fire
-#   file     optional; a generated child file's path as written (findings in a
-#            heredoc the installer writes and later runs); defaults to the
-#            installer itself. Lines are then the child's own.
-#   engines  optional; defaults to both ["shfmt", "regex"]. An entry for the
-#            regex engine alone is where the fallback over-reports by design.
+# Per installer: `max_severity` (and `regex_max_severity` when the regex
+# fallback differs), one [[<name>.finding]] per rule that fires, and the
+# footprint each engine computes ([<name>.footprint] for the syntax tree,
+# [<name>.regex_footprint] for the fallback).
+#
+# A finding entry:
+#   rule      static rule id (syntax-tree/regex rule, shellcheck SC code, or a
+#             chkscript coverage warning)
+#   category  "unsafe", "capability" or "lint" (docs/spec.md, Finding categories)
+#   verdict   "true-positive": the matched code runs, during install or later
+#             from a generated file the installer writes, and does what the
+#             rule describes.
+#             "noise": the match is on text that never runs during install (a
+#             heredoc message), a wrong span, a lint that is not a safety
+#             concern, or a benign idiom the rule was not written for.
+#   note      one line; mktemp cleanups say "mktemp cleanup" so they can be
+#             counted
+#   lines     every non-shellcheck rule: the exact lines that fire
+#   count     instead of lines, for runs-as-root: how many lines fire
+#   file      optional; a generated child file's path as written (findings in a
+#             heredoc the installer writes and later runs); defaults to the
+#             installer itself. Lines are then the child's own.
+#   engines   optional; defaults to both ["shfmt", "regex"]. An entry for the
+#             regex engine alone is where the fallback over-reports by design.
+#
+# A footprint table holds the fields of the JSON `footprint`. TOML has no null,
+# so a field chkscript cannot back is written "null". `unresolved_at` and
+# `unresolved_writes` are [file, line] pairs and are omitted when empty.
 #
 # shellcheck entries are pinned by rule id, not line or file.
 
 [rustup]
-max_severity = "unsafe"
+max_severity = "warning"
 
 [[rustup.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [175]
 verdict = "true-positive"
-note = "Downloads rustup-init over HTTPS (through `ensure downloader`) and runs `chmod u+x` with no checksum or signature check; trust rests on TLS alone."
+note = "Downloads rustup-init over HTTPS (through `ensure downloader`) and runs `chmod u+x` with no checksum or signature check; trust rests on TLS alone. A capability now, not unsafe."
 
 [[rustup.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [315]
 engines = ["regex"]
 verdict = "noise"
 note = "Regex fallback only: `chmod u+x \"$_tmp\"` on a helper decoded from a heredoc, not a download; the fallback ties files by text and no verifier names $_tmp."
 
+[rustup.footprint]
+privilege = "user"
+persistence = "null"
+network_hosts = ["static.rust-lang.org", "(unresolved)"]
+coverage = "full"
+unresolved_writes = [["<entry>", 703], ["<entry>", 710], ["<entry>", 714], ["<entry>", 729], ["<entry>", 735], ["<entry>", 741], ["<entry>", 744]]
+absent = "null"
+
+[rustup.regex_footprint]
+privilege = "null"
+persistence = "null"
+network_hosts = ["github.com", "static.rust-lang.org", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
+
 [homebrew]
-max_severity = "safe"
-regex_max_severity = "unsafe"
+max_severity = "warning"
+
+[[homebrew.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 24
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "`execute_sudo` and `sudo` calls (mkdir, chown, chmod, install into the prefix and /etc/paths.d); a Homebrew install needs root for its prefix."
+
+[[homebrew.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 8
+engines = ["regex"]
+verdict = "true-positive"
+note = "Regex fallback: the literal `sudo` words it can see in command position, including some inside printed heredocs; the tree reads execute_sudo as well."
+
+[[homebrew.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [1090]
+verdict = "true-positive"
+note = "`execute_sudo /usr/bin/install ... /etc/paths.d/homebrew` adds the prefix to every user's PATH."
+
+[[homebrew.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [1053]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "`ln -sf ../Homebrew/bin/brew \"${HOMEBREW_PREFIX}/bin/brew\"`; HOMEBREW_PREFIX defaults to /opt/homebrew (a hint), so this is a write under /opt."
 
 [[homebrew.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [614]
 engines = ["regex"]
 verdict = "noise"
@@ -53,330 +112,749 @@ note = "Regex fallback only: `sudo chmod 775 ${HOMEBREW_PREFIX}` inside an abort
 
 [[homebrew.finding]]
 rule = "eval-dynamic"
+category = "capability"
 lines = [1173, 1181]
 engines = ["regex"]
 verdict = "noise"
 note = "Regex fallback only: `eval \"$(brew shellenv)\"` text inside `cat <<EOS` instructions printed for the user, never run by the installer."
 
+[homebrew.footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "full"
+unresolved_writes = [["<entry>", 1089]]
+absent = "null"
+
+[homebrew.regex_footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["docs.brew.sh", "github.com", "(unresolved)"]
+coverage = "reduced"
+unresolved_at = [["<entry>", 1173], ["<entry>", 1181]]
+absent = "null"
+
 [nvm]
-max_severity = "unsafe"
+max_severity = "warning"
 
 [[nvm.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [291]
 verdict = "true-positive"
 note = "Downloads nvm.sh, nvm-exec and completion over HTTPS (through nvm_download) and marks nvm-exec executable with no checksum check."
+
+[nvm.footprint]
+privilege = "user"
+persistence = "null"
+network_hosts = ["(unresolved)"]
+coverage = "full"
+unresolved_writes = [["<entry>", 121], ["<entry>", 486], ["<entry>", 493]]
+absent = "null"
+
+[nvm.regex_footprint]
+privilege = "null"
+persistence = "null"
+network_hosts = ["github.com", "raw.githubusercontent.com", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
 
 [docker]
 max_severity = "warning"
 
 [[docker.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 30
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Every `$sh_c` command when sh_c is `sudo -E sh -c` (apt-get, dnf, yum, the repo and key writes); installing Docker needs root."
+
+[[docker.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 1
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback: `$(id -un)` read as a root check; the fallback cannot tell a probe that selects sudo from one that gates the script."
+
+[[docker.finding]]
+rule = "package-repo-added"
+category = "capability"
+lines = [609, 698, 708]
+verdict = "true-positive"
+note = "609 writes docker.list to /etc/apt/sources.list.d with `signed-by=/etc/apt/keyrings/docker.asc` (read from $apt_repo's assignment), so scoped; 698 and 708 add the dnf/yum repo with --add-repo, global since rpm keys are."
+
+[[docker.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [606]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: `install -m 0755 -d /etc/apt/keyrings` read as a write to /etc; the tree knows the key directory belongs to the repository finding."
+
+[[docker.finding]]
 rule = "SC2317"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unreachable command; a lint, not a safety concern."
+
+[docker.footprint]
+privilege = "root"
+persistence = false
+network_hosts = ["download.docker.com", "mirror.azure.cn", "mirrors.aliyun.com", "(unresolved)"]
+coverage = "full"
+absent = ["persistence", "system-write"]
+
+[docker.regex_footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["download.docker.com", "mirror.azure.cn", "mirrors.aliyun.com", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
 
 [k3s]
 max_severity = "unsafe"
 
 [[k3s.finding]]
-rule = "rm-rf-variable"
+rule = "rm-rf-unguarded"
+category = "unsafe"
 lines = [237, 354]
-verdict = "noise"
-note = "237: BIN_DIR test path inside `sh -c` (BIN_DIR is not a constant: it can come from the environment); 354: mktemp cleanup of TMP_DIR."
+verdict = "true-positive"
+note = "Stays unsafe by the rule: 237 `rm -rf ${BIN_DIR}/k3s-ro-test` inside `sh -c` with BIN_DIR unquoted and environment-settable (an empty value removes /k3s-ro-test, a single file); 354 `rm -rf ${TMP_DIR}`, an unquoted mktemp cleanup (NIM-112)."
 
 [[k3s.finding]]
-rule = "rm-rf-variable"
-file = "$KILLALL_K3S_SH"
-lines = [75]
+rule = "rm-rf-unguarded"
+category = "unsafe"
+lines = [878, 943, 952]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: the generated killall/uninstall commands seen as heredoc text in place; the fallback cannot tell their quoted `\"$0\"`, `\"$1\"` and `\"$path\"` from unguarded ones."
+
+[[k3s.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 47
 engines = ["shfmt"]
 verdict = "true-positive"
-note = "Generated k3s-killall.sh (written at 803, chmod 755 at 896), line 878 of the installer: `xargs ... sh -c 'umount -f \"$0\" && rm -rf \"$0\"'` on paths read from /proc/self/mounts; runs later as root, not at install."
+note = "Every `$SUDO` command (SUDO is sudo unless already root): binary install, symlinks, service files, systemctl."
+
+[[k3s.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 3
+engines = ["regex"]
+verdict = "true-positive"
+note = "Regex fallback: the `$(id -u)` probe at 220 and the literal `sudo` it sees; it cannot resolve `$SUDO`."
+
+[[k3s.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [1110]
+verdict = "true-positive"
+note = "Writes /etc/logrotate.d/${SYSTEM_NAME}, a logrotate config for the service."
+
+[[k3s.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [581, 789, 803, 904, 1031, 1032]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Into BIN_DIR (hinted /usr/local/bin or /opt/bin): the k3s binary (581), kubectl/crictl/ctr symlinks (789), the killall (803) and uninstall (904) scripts; and the service env files under /etc (1031, 1032)."
+
+[[k3s.finding]]
+rule = "package-repo-added"
+category = "capability"
+lines = [685]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Writes rancher-k3s-common.repo to ${repodir} (hinted /etc/yum.repos.d or /etc/zypp/repos.d) for k3s-selinux, with an rpm gpgkey: a global key."
+
+[[k3s.finding]]
+rule = "persistence-append"
+category = "capability"
+lines = [1031, 1032, 1038, 1078]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Writes the service env file (1031, 1032) and the systemd unit or OpenRC script (1038, 1078) through hinted paths; a server install's service."
+
+[[k3s.finding]]
+rule = "eval-dynamic"
+category = "capability"
+lines = [1203]
+verdict = "true-positive"
+note = "`eval set -- $(escape \"${INSTALL_K3S_EXEC}\") ...` evaluates environment-supplied text; deliberate and escaped, and a capability now. It is also why the footprint states no absence."
+
+[[k3s.finding]]
+rule = "runs-as-root"
+category = "capability"
+file = "$KILLALL_K3S_SH"
+count = 1
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Generated k3s-killall.sh: its `[ $(id -u) -eq 0 ] || exec sudo $0 $@` root check; runs later, not at install."
+
+[[k3s.finding]]
+rule = "runs-as-root"
+category = "capability"
+file = "$UNINSTALL_K3S_SH"
+count = 1
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Generated k3s-uninstall.sh: the same root check; runs later, on uninstall."
 
 [[k3s.finding]]
 rule = "rm-rf-variable"
+category = "capability"
 file = "$UNINSTALL_K3S_SH"
 lines = [39, 48]
 engines = ["shfmt"]
 verdict = "true-positive"
-note = "Generated k3s-uninstall.sh (written at 904, chmod 755 at 1015), installer lines 943 and 952: `rm -rf \"$1\"` and `rm -rf \"$path\"` in the uninstaller's mount cleanup helpers; paths come from its own arguments, and the code runs only on uninstall."
+note = "Generated k3s-uninstall.sh (written at 904, chmod 755 at 1015), installer lines 943 and 952: quoted `rm -rf \"$1\"` and `rm -rf \"$path\"` in the mount cleanup helper; a capability now, run only on uninstall."
 
 [[k3s.finding]]
 rule = "rm-rf-variable"
-lines = [878, 943, 952]
-engines = ["regex"]
-verdict = "noise"
-note = "Regex fallback only: the same commands as the generated-file entries above, seen as heredoc text in place."
+category = "capability"
+file = "$KILLALL_K3S_SH"
+lines = [75]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Generated k3s-killall.sh (written at 803, chmod 755 at 896), installer line 878: `xargs ... sh -c 'umount -f \"$0\" && rm -rf \"$0\"'` on paths read from /proc/self/mounts; quoted, so a capability; runs later as root."
 
 [[k3s.finding]]
-rule = "eval-dynamic"
-lines = [1203]
-verdict = "true-positive"
-note = "`eval set -- $(escape \"${INSTALL_K3S_EXEC}\") ...` evaluates environment-supplied text; deliberate and escaped, but exactly what the rule describes."
+rule = "unverified-download"
+category = "capability"
+lines = [896, 1015]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: `chmod 755` on the generated killall/uninstall scripts, not downloads; no verifier line names them."
 
 [[k3s.finding]]
 rule = "curl-pipe-shell"
+category = "unsafe"
 lines = [1193]
 engines = ["regex"]
 verdict = "noise"
 note = "Regex fallback only: `$SUDO ${XTABLES}-save | ... | $SUDO ${XTABLES}-restore`; the fallback reads a variable command piped to a variable receiver as a possible download run by a shell."
 
 [[k3s.finding]]
-rule = "unverified-download"
-lines = [896, 1015]
-engines = ["regex"]
-verdict = "noise"
-note = "Regex fallback only: `chmod 755` on the generated killall/uninstall scripts, not downloads; no verifier line names them."
-
-# Line 580 (`$SUDO chown root:root ${TMP_BIN}`) used to fire insecure-permissions
-# under Semgrep only: its pattern-regex `(\S+\s+)*` crossed newlines to a later
-# /tmp. NIM-98 confined every pattern-regex to one line, and Semgrep is gone.
-
-[[k3s.finding]]
 rule = "SC1008"
+category = "lint"
 engines = ["shfmt"]
 verdict = "noise"
 note = "shellcheck, in the generated OpenRC service file: `#!/sbin/openrc-run` is not a shebang shellcheck knows; lint."
 
 [[k3s.finding]]
 rule = "SC2016"
+category = "lint"
 engines = ["shfmt"]
 verdict = "noise"
 note = "shellcheck, in the generated killall script: `$0` inside single quotes for `sh -c`; deliberate, lint."
 
 [[k3s.finding]]
 rule = "SC2068"
+category = "lint"
 engines = ["shfmt"]
 verdict = "noise"
 note = "shellcheck, in the generated killall and uninstall scripts: unquoted array expansion; robustness lint."
 
 [[k3s.finding]]
 rule = "SC2231"
+category = "lint"
 engines = ["shfmt"]
 verdict = "noise"
 note = "shellcheck, in the generated killall script: unquoted expansion in a for-loop glob; lint."
 
 [[k3s.finding]]
 rule = "SC2006"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: legacy backticks; style lint."
 
 [[k3s.finding]]
 rule = "SC2034"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: variable appears unused; lint."
 
 [[k3s.finding]]
 rule = "SC2046"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted command substitution; robustness lint, not a safety concern."
 
 [[k3s.finding]]
 rule = "SC2086"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted variables (57 hits); robustness lint, not a safety concern."
 
 [[k3s.finding]]
 rule = "SC2162"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: read without -r; lint."
 
 [[k3s.finding]]
 rule = "SC2235"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: subshell grouping where braces suffice; style lint."
 
 [[k3s.finding]]
 rule = "SC3009"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: brace expansion is not POSIX sh; portability lint."
+
+[k3s.footprint]
+privilege = "root"
+persistence = true
+network_hosts = ["api.github.com", "github.com", "update.k3s.io", "(unresolved)"]
+coverage = "full"
+unresolved_at = [["<entry>", 1203]]
+unresolved_writes = [["<entry>", 440], ["<entry>", 444]]
+absent = "null"
+
+[k3s.regex_footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["api.github.com", "github.com", "k3s.io", "update.k3s.io", "(unresolved)"]
+coverage = "reduced"
+unresolved_at = [["<entry>", 1193], ["<entry>", 1203]]
+absent = "null"
 
 [ollama]
 max_severity = "unsafe"
 
 [[ollama.finding]]
-rule = "rm-rf-variable"
-lines = [19]
-verdict = "noise"
-note = "mktemp cleanup: `rm -rf $TEMP_DIR` where TEMP_DIR=$(mktemp -d) on line 18."
-
-[[ollama.finding]]
-rule = "curl-pipe-shell"
-lines = [146, 154, 369, 371]
-engines = ["regex"]
-verdict = "noise"
-note = "Regex fallback only: `curl ... | $SUDO tar -xzf -`; the fallback reads a variable receiver as a possible shell, where the syntax tree resolves SUDO to sudo or empty."
-
-[[ollama.finding]]
-rule = "rm-rf-variable"
-lines = [166]
+rule = "rm-rf-unguarded"
+category = "unsafe"
+lines = [19, 166]
 verdict = "true-positive"
-note = "Runs `$SUDO rm -rf \"$OLLAMA_INSTALL_DIR/lib/ollama\"` as root on a variable path; low impact (an empty variable deletes /lib/ollama, not /)."
+note = "Stays unsafe by the rule: 19 `rm -rf $TEMP_DIR`, an unquoted mktemp cleanup (NIM-112); 166 `$SUDO rm -rf \"$OLLAMA_INSTALL_DIR/lib/ollama\"` as root with no `:?` guard (an empty variable deletes /lib/ollama, not /)."
+
+[[ollama.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 38
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Every `$SUDO` and `sudo` command: binary install, the ollama user and group, the systemd unit, CUDA drivers."
+
+[[ollama.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 4
+engines = ["regex"]
+verdict = "true-positive"
+note = "Regex fallback: the literal `sudo` calls and the `$(id -u)` probe it can see; it cannot resolve `$SUDO`."
+
+[[ollama.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [82, 446]
+verdict = "true-positive"
+note = "82 links /usr/local/bin/ollama on macOS; 446 appends to /etc/modules-load.d/nvidia.conf."
+
+[[ollama.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [83, 175]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "83 the sudo retry of the macOS link; 175 `$SUDO ln -sf ... \"$BINDIR/ollama\"` with BINDIR hinted /usr/local/bin."
 
 [[ollama.finding]]
 rule = "persistence-append"
+category = "capability"
 lines = [215]
 verdict = "true-positive"
-note = "Writes /etc/systemd/system/ollama.service via `sudo tee`: real persistence, expected for a server install."
+note = "Writes /etc/systemd/system/ollama.service via `sudo tee`: real persistence, expected for a server install. A capability now."
+
+[[ollama.finding]]
+rule = "package-repo-added"
+category = "capability"
+lines = [325, 332, 369, 371]
+verdict = "true-positive"
+note = "325 and 332 add NVIDIA's CUDA repo with `config-manager --add-repo` (rpm keys are global); 369 and 371 copy the Debian sources to contrib.list/contrib.sources, enabling contrib for the CUDA driver, trusted by the existing global keys."
+
+[[ollama.finding]]
+rule = "curl-pipe-shell"
+category = "unsafe"
+lines = [146, 154, 369, 371]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: `curl ... | $SUDO tar -xzf -` (146, 154) and `sed ... | $SUDO tee` (369, 371); the fallback reads a variable receiver as a possible shell, where the syntax tree resolves SUDO to sudo or empty."
 
 [[ollama.finding]]
 rule = "SC2015"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: `A && B || C` is not if-then-else; lint."
 
 [[ollama.finding]]
 rule = "SC2046"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted command substitution; robustness lint, not a safety concern."
 
 [[ollama.finding]]
 rule = "SC2048"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted $*; robustness lint."
 
 [[ollama.finding]]
 rule = "SC2086"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted variables; robustness lint, not a safety concern."
 
 [[ollama.finding]]
 rule = "SC2143"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: grep -q preferred over [ -n \"$(grep)\" ]; style lint."
 
 [[ollama.finding]]
 rule = "SC3043"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: `local` is not POSIX sh; portability lint."
 
+[ollama.footprint]
+privilege = "root"
+persistence = true
+network_hosts = ["developer.download.nvidia.com", "ollama.com", "(unresolved)"]
+coverage = "full"
+absent = []
+
+[ollama.regex_footprint]
+privilege = "root"
+persistence = true
+network_hosts = ["developer.download.nvidia.com", "docs.nvidia.com", "ollama.com", "(unresolved)"]
+coverage = "reduced"
+unresolved_at = [["<entry>", 146], ["<entry>", 154], ["<entry>", 369], ["<entry>", 371]]
+absent = "null"
+
 [uv]
-max_severity = "unsafe"
+max_severity = "warning"
+regex_max_severity = "unsafe"
 
 [[uv.finding]]
 rule = "rm-rf-variable"
+category = "capability"
 lines = [569, 1395]
+engines = ["shfmt"]
 verdict = "noise"
-note = "mktemp cleanup: 569 removes _dir=$(mktemp -d); 1395 removes the two mktemp dirs from lines 1349-1350."
+note = "mktemp cleanup: 569 removes \"$_dir\" (from `mktemp -d`); 1395 removes the two quoted mktemp dirs from lines 1349-1350. Quoted, so a capability now."
+
+[[uv.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 2
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: `$(id -un)` used to look up the home directory, read as a root check."
+
+[[uv.finding]]
+rule = "rm-rf-unguarded"
+category = "unsafe"
+lines = [569, 1395]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: the quoted mktemp cleanups above; the fallback reports every `rm -rf` on a variable as unguarded."
 
 [[uv.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [1366, 1373, 1742]
 engines = ["regex"]
 verdict = "noise"
 note = "Regex fallback only: chmod +x on binaries extracted from the verified archive (1366, 1373) and on a helper decoded from a heredoc (1742); no verifier line names those paths."
 
+[uv.footprint]
+privilege = "user"
+persistence = "null"
+network_hosts = ["(unresolved)"]
+coverage = "full"
+unresolved_writes = [["<entry>", 563], ["<entry>", 576], ["<entry>", 1386], ["<entry>", 1388], ["<entry>", 1392], ["<entry>", 1483], ["<entry>", 1574], ["<entry>", 1575], ["<entry>", 1618], ["<entry>", 1637], ["<entry>", 2006], ["<entry>", 2032], ["<entry>", 2056], ["<entry>", 2100], ["<entry>", 2102], ["<entry>", 2106], ["<entry>", 2108]]
+absent = "null"
+
+[uv.regex_footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["github.com", "releases.astral.sh", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
+
 [bun]
-max_severity = "unsafe"
+max_severity = "warning"
 
 [[bun.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [158]
 verdict = "true-positive"
-note = "Downloads the bun zip over HTTPS and runs `chmod +x` on the binary with no checksum or signature check."
+note = "Downloads the bun zip over HTTPS and runs `chmod +x` on the binary with no checksum or signature check. A capability now."
+
+[[bun.finding]]
+rule = "persistence-append"
+category = "capability"
+lines = [241, 244]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "Appends `# bun` and the PATH export to ~/.zshrc (`>> \"$zsh_config\"`, hinted from its assignment); a shell rc change."
 
 [[bun.finding]]
 rule = "SC2145"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: argument mixes string and array; lint."
 
+[bun.footprint]
+privilege = "user"
+persistence = true
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "full"
+unresolved_writes = [["<entry>", 288], ["<entry>", 291]]
+absent = "null"
+
+[bun.regex_footprint]
+privilege = "null"
+persistence = "null"
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
+
 [deno]
-max_severity = "unsafe"
+max_severity = "warning"
 
 [[deno.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [85]
 verdict = "true-positive"
-note = "Downloads the deno zip over HTTPS and runs `chmod +x` with no checksum or signature check."
+note = "Downloads the deno zip over HTTPS and runs `chmod +x` with no checksum or signature check. A capability now."
+
+[deno.footprint]
+privilege = "user"
+persistence = false
+network_hosts = ["dl.deno.land", "(unresolved)"]
+coverage = "full"
+absent = ["persistence", "system-write", "trust"]
+
+[deno.regex_footprint]
+privilege = "null"
+persistence = "null"
+network_hosts = ["dl.deno.land", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
 
 [k3d-no-checksum]
-max_severity = "unsafe"
+max_severity = "warning"
+regex_max_severity = "unsafe"
+
+[[k3d-no-checksum.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 2
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "`runAsRoot chmod` and `runAsRoot cp`: runAsRoot prefixes sudo unless already root or USE_SUDO=false."
+
+[[k3d-no-checksum.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 1
+engines = ["regex"]
+verdict = "true-positive"
+note = "Regex fallback: the `$EUID` check inside runAsRoot; it cannot follow the function."
 
 [[k3d-no-checksum.finding]]
 rule = "unverified-download"
+category = "capability"
 lines = [144]
 verdict = "true-positive"
-note = "Downloads the k3d binary and runs `chmod +x` with no checksum check."
+note = "Downloads the k3d binary and runs `chmod +x` with no checksum check. A capability now."
+
+[[k3d-no-checksum.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [145]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "`runAsRoot cp ... \"$K3D_INSTALL_DIR/$APP_NAME\"`, K3D_INSTALL_DIR defaulting to /usr/local/bin."
 
 [[k3d-no-checksum.finding]]
 rule = "rm-rf-variable"
+category = "capability"
 lines = [184]
+engines = ["shfmt"]
 verdict = "noise"
-note = "mktemp cleanup: `rm -rf \"$K3D_TMP_ROOT\"` where K3D_TMP_ROOT=$(mktemp -dt ...) on line 131."
+note = "mktemp cleanup: `rm -rf \"$K3D_TMP_ROOT\"` where K3D_TMP_ROOT=$(mktemp -dt ...) on line 131. Quoted, so a capability, no longer unsafe."
+
+[[k3d-no-checksum.finding]]
+rule = "rm-rf-unguarded"
+category = "unsafe"
+lines = [184]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: the same quoted mktemp cleanup; the fallback reports every `rm -rf` on a variable as unguarded."
 
 [[k3d-no-checksum.finding]]
 rule = "SC1083"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: literal brace in `%{url_effective}`; lint."
 
 [[k3d-no-checksum.finding]]
 rule = "SC2016"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: expression in single quotes does not expand; lint."
 
 [[k3d-no-checksum.finding]]
 rule = "SC2086"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted variable; robustness lint, not a safety concern."
 
 [[k3d-no-checksum.finding]]
 rule = "SC2124"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: array assigned to a string; lint."
 
 [[k3d-no-checksum.finding]]
 rule = "SC2155"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: declare and assign separately; lint."
 
 [[k3d-no-checksum.finding]]
 rule = "SC2166"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: `[ p -a q ]` is not well defined; lint."
 
 [[k3d-no-checksum.finding]]
 rule = "SC2223"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted default assignment; robustness lint."
+
+[k3d-no-checksum.footprint]
+privilege = "root"
+persistence = false
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "full"
+absent = ["persistence", "trust"]
+
+[k3d-no-checksum.regex_footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "reduced"
+absent = "null"
 
 [k3d-with-checksum]
-max_severity = "unsafe"
+max_severity = "warning"
+regex_max_severity = "unsafe"
+
+[[k3d-with-checksum.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 2
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "`runAsRoot chmod` and `runAsRoot cp`: runAsRoot prefixes sudo unless already root or USE_SUDO=false."
+
+[[k3d-with-checksum.finding]]
+rule = "runs-as-root"
+category = "capability"
+count = 1
+engines = ["regex"]
+verdict = "true-positive"
+note = "Regex fallback: the `$EUID` check inside runAsRoot; it cannot follow the function."
+
+[[k3d-with-checksum.finding]]
+rule = "system-path-write"
+category = "capability"
+lines = [182]
+engines = ["shfmt"]
+verdict = "true-positive"
+note = "`runAsRoot cp ... \"$K3D_INSTALL_DIR/$APP_NAME\"`, K3D_INSTALL_DIR defaulting to /usr/local/bin."
 
 [[k3d-with-checksum.finding]]
 rule = "rm-rf-variable"
+category = "capability"
 lines = [221]
+engines = ["shfmt"]
 verdict = "noise"
-note = "mktemp cleanup: `rm -rf \"$K3D_TMP_ROOT\"` where K3D_TMP_ROOT=$(mktemp -dt ...); the only unsafe finding on this script."
+note = "mktemp cleanup: `rm -rf \"$K3D_TMP_ROOT\"` where K3D_TMP_ROOT=$(mktemp -dt ...). Quoted, so a capability; this installer is no longer unsafe."
+
+[[k3d-with-checksum.finding]]
+rule = "rm-rf-unguarded"
+category = "unsafe"
+lines = [221]
+engines = ["regex"]
+verdict = "noise"
+note = "Regex fallback only: the same quoted mktemp cleanup; the fallback reports every `rm -rf` on a variable as unguarded."
 
 [[k3d-with-checksum.finding]]
 rule = "SC1083"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: literal brace in `%{url_effective}`; lint."
 
 [[k3d-with-checksum.finding]]
 rule = "SC2016"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: expression in single quotes does not expand; lint."
 
 [[k3d-with-checksum.finding]]
 rule = "SC2086"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted variable; robustness lint, not a safety concern."
 
 [[k3d-with-checksum.finding]]
 rule = "SC2124"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: array assigned to a string; lint."
 
 [[k3d-with-checksum.finding]]
 rule = "SC2155"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: declare and assign separately; lint."
 
 [[k3d-with-checksum.finding]]
 rule = "SC2166"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: `[ p -a q ]` is not well defined; lint."
 
 [[k3d-with-checksum.finding]]
 rule = "SC2223"
+category = "lint"
 verdict = "noise"
 note = "shellcheck: unquoted default assignment; robustness lint."
+
+[k3d-with-checksum.footprint]
+privilege = "root"
+persistence = false
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "full"
+absent = ["persistence", "trust"]
+
+[k3d-with-checksum.regex_footprint]
+privilege = "root"
+persistence = "null"
+network_hosts = ["github.com", "(unresolved)"]
+coverage = "reduced"
+absent = "null"

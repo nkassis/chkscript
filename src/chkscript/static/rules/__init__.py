@@ -1,4 +1,5 @@
-"""Unsafe-tier rules: Python functions over the command model.
+"""Static rules (unsafe and capability tiers): Python functions over the
+command model.
 
 Each rule takes a CommandModel (static/commands.py) and yields a Hit per
 offending line. Rules never read script text, so a heredoc printed to the user
@@ -11,8 +12,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from chkscript.static.commands import CommandModel
-from chkscript.static.rules import downloads, execution, pipelines, writes
-from chkscript.static.rules.catalog import MESSAGES, RULE_IDS
+from chkscript.static.rules import downloads, execution, pipelines, trust, writes
+from chkscript.static.rules.catalog import (
+    CATEGORIES,
+    GROUPS,
+    MESSAGES,
+    RULE_IDS,
+    finding,
+    label,
+    message,
+)
 from chkscript.static.rules.common import Hit
 
 Rule = Callable[[CommandModel], Iterable[Hit]]
@@ -28,12 +37,37 @@ RULES: tuple[Rule, ...] = (
     writes.persistence_append,
     writes.insecure_permissions,
     downloads.unverified_download,
+    execution.runs_as_root,
+    writes.system_path_write,
+    trust.package_repo_added,
+    trust.root_equivalent_group,
 )
 
-__all__ = ["MESSAGES", "RULES", "RULE_IDS", "Hit", "run"]
+__all__ = [
+    "CATEGORIES",
+    "GROUPS",
+    "MESSAGES",
+    "RULES",
+    "RULE_IDS",
+    "Hit",
+    "finding",
+    "label",
+    "message",
+    "run",
+]
 
 
 def run(model: CommandModel) -> list[Hit]:
-    """Every rule's hits, deduplicated, in line order."""
-    hits = {hit for rule in RULES for hit in rule(model)}
-    return sorted(hits, key=lambda h: (h.line, h.rule_id))
+    """Every rule's hits, one per (rule, line), in line order. Hits on one
+    line keep the first variant and every distinct subject."""
+    merged: dict[tuple[str, int], Hit] = {}
+    for rule in RULES:
+        for hit in rule(model):
+            key = (hit.rule_id, hit.line)
+            seen = merged.get(key)
+            if seen is None:
+                merged[key] = hit
+            elif hit.subject and hit.subject not in (seen.subject or "").split(", "):
+                joined = [s for s in (seen.subject, hit.subject) if s]
+                merged[key] = seen._replace(subject=", ".join(joined))
+    return sorted(merged.values(), key=lambda h: (h.line, h.rule_id))

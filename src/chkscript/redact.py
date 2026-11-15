@@ -235,6 +235,8 @@ def mask_finding(finding: Finding, masker: Masker) -> Finding:
             "line_reference": masker.optional(finding.line_reference),
             "rule_id": masker.optional(finding.rule_id),
             "file": masker(finding.file),
+            "label": masker.optional(finding.label),
+            "subject": masker.optional(finding.subject),
         }
     )
 
@@ -251,6 +253,25 @@ def mask_result(
             "summary": masker(result.summary),
             "notes": [masker(note) for note in result.notes],
             "findings": [mask_finding(f, masker) for f in result.findings],
+            "footprint": (
+                None
+                if result.footprint is None
+                else result.footprint.model_copy(
+                    update={
+                        "network_hosts": [
+                            masker(h) for h in result.footprint.network_hosts
+                        ],
+                        "unresolved_at": [
+                            u.model_copy(update={"file": masker(u.file)})
+                            for u in result.footprint.unresolved_at
+                        ],
+                        "unresolved_writes": [
+                            u.model_copy(update={"file": masker(u.file)})
+                            for u in result.footprint.unresolved_writes
+                        ],
+                    }
+                )
+            ),
         }
     )
 
@@ -282,6 +303,11 @@ def _finding(
         rule_id=RULE_ID,
         file=bundle.file,
         line=line,
+        # catalog.GROUPS and LABELS hold the same values (a test checks);
+        # importing the static layer from here would be circular.
+        group="other",
+        label="Contains a hardcoded credential",
+        subject=names,
     )
 
 

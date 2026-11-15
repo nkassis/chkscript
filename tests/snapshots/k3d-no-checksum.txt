@@ -1,0 +1,12 @@
+== Summary ==
+Static analysis only.
+
+NEEDS   root · no persistent changes · downloads from 2 hosts (1 unresolved)
+
+== What this script will do to your machine ==
+  root          Runs commands as root (2 places, first at line 144)
+  system-write  Writes to system paths: /usr/local/bin/k3d (line 145)
+  download      Downloads binaries verified only by TLS: $K3D_TMP_FILE (line 144)
+  other         Deletes a directory named by a variable: $K3D_TMP_ROOT (line 184)
+  No other changes found: no services, cron jobs, shell config, repos or group changes
+

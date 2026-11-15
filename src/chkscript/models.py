@@ -19,6 +19,8 @@ Mode = Literal["full", "no-follow", "static-only"]
 # unsafe: never legitimate in an installer (the floor). See docs/spec.md.
 Category = Literal["lint", "capability", "unsafe"]
 CATEGORY_RANK: dict[Category, int] = {"lint": 0, "capability": 1, "unsafe": 2}
+# The footprint group of a capability rule (docs/spec.md, Footprint groups).
+Group = Literal["root", "persistence", "system-write", "trust", "download", "other"]
 
 ENTRY_FILE = "<entry>"
 
@@ -94,6 +96,12 @@ class Finding(BaseModel):
     # `parent_line` the line in the parent that writes it.
     generated: bool = False
     parent_line: int | None = None
+    # Capability findings from a static rule: the rule's footprint group (kept
+    # when the model raises the finding to unsafe), the report's plain-words
+    # line for it, and what it acts on (a unit name, a path, a group).
+    group: Group | None = None
+    label: str | None = None
+    subject: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -159,6 +167,34 @@ class FetchRecord(BaseModel):
     reason: str | None = None
 
 
+class Location(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    file: str = ENTRY_FILE
+    line: int | None = None
+
+
+class Footprint(BaseModel):
+    """What the script does to the machine, computed by chkscript from the
+    merged findings and the recorded downloads, never by the model.
+
+    A negative (`user`, no persistence, an absent group) is stated only when
+    coverage is full and no code went unresolved; otherwise it is None.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    privilege: Literal["user", "root"] | None
+    persistence: bool | None
+    network_hosts: list[str] = Field(default_factory=list)
+    coverage: Literal["full", "reduced"]
+    unresolved_at: list[Location] = Field(default_factory=list)
+    # Writes to a path chkscript could not resolve: any of them may be a
+    # service, a shell rc file or a repository, so no group is stated absent.
+    unresolved_writes: list[Location] = Field(default_factory=list)
+    absent: list[Group] | None = None
+
+
 class AnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -167,6 +203,7 @@ class AnalysisResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
     mode: Mode = "full"
     static_tools: list[StaticTool] = Field(default_factory=list)
+    footprint: Footprint | None = None
 
     @property
     def max_severity(self) -> Severity:

@@ -1,4 +1,5 @@
-"""Golden suite: each fixture's max severity and unsafe rule ids, per engine.
+"""Golden suite: each fixture's max severity and unsafe rule ids, per engine,
+and under the syntax tree its capability rule ids.
 
 "shfmt" is the normal static layer. "regex" makes shfmt unusable so the regex
 fallback stands in for it; shellcheck runs in both, since the warning tier is
@@ -13,7 +14,7 @@ import pytest
 
 from chkscript.models import Severity
 from chkscript.preprocess import preprocess
-from chkscript.static import StaticResult, run_static, shellcheck, shfmt
+from chkscript.static import StaticResult, rules, run_static, shellcheck, shfmt
 from tests.conftest import require_tool
 
 ROOT = Path(__file__).parent
@@ -23,15 +24,44 @@ GOLDEN: dict[str, tuple[Severity, set[str]]] = {
     "fixtures/safe.sh": (Severity.SAFE, set()),
     "fixtures/warnings_only.sh": (Severity.WARNING, set()),
     "fixtures/curl_pipe_sh.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
-    "fixtures/eval_variable.sh": (Severity.UNSAFE, {"eval-dynamic"}),
+    # eval of a local file's contents: a capability (eval-dynamic), not remote.
+    "fixtures/eval_variable.sh": (Severity.WARNING, set()),
     "fixtures/base64_to_sh.sh": (Severity.UNSAFE, {"decode-to-shell"}),
     "fixtures/evasion_var_cmd.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/injection_comment.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/unparseable.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
     "fixtures/http_download.sh": (Severity.UNSAFE, {"http-download"}),
-    "fixtures/binary_no_checksum.sh": (Severity.UNSAFE, {"unverified-download"}),
-    "fixtures/binary_with_checksum.sh": (Severity.SAFE, set()),
+    # Integrity resting on TLS alone is a capability now (docs/spec.md).
+    "fixtures/binary_no_checksum.sh": (Severity.WARNING, set()),
+    # Verified, but it still installs to /usr/local/bin with sudo.
+    "fixtures/binary_with_checksum.sh": (Severity.WARNING, set()),
+    "fixtures/docker_group.sh": (Severity.WARNING, set()),
+    "fixtures/apt_global_key.sh": (Severity.WARNING, set()),
+    "fixtures/apt_signed_by.sh": (Severity.WARNING, set()),
     # The k3d installers moved to tests/corpus/ and are pinned by test_corpus.py.
+}
+
+
+# Where the fallback over-reports by design: `curl ... | sudo gpg` reads as a
+# download piped to sudo, which may run a shell.
+REGEX_GOLDEN: dict[str, tuple[Severity, set[str]]] = {
+    "fixtures/apt_global_key.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
+    "fixtures/apt_signed_by.sh": (Severity.UNSAFE, {"curl-pipe-shell"}),
+}
+
+# fixture path -> capability rule ids the syntax-tree engine reports.
+CAPABILITIES: dict[str, set[str]] = {
+    "fixtures/safe.sh": set(),
+    "fixtures/eval_variable.sh": {"eval-dynamic"},
+    "fixtures/binary_no_checksum.sh": {
+        "unverified-download",
+        "runs-as-root",
+        "system-path-write",
+    },
+    "fixtures/binary_with_checksum.sh": {"runs-as-root", "system-path-write"},
+    "fixtures/docker_group.sh": {"root-equivalent-group", "runs-as-root"},
+    "fixtures/apt_global_key.sh": {"package-repo-added", "runs-as-root"},
+    "fixtures/apt_signed_by.sh": {"package-repo-added", "runs-as-root"},
 }
 
 
@@ -49,11 +79,45 @@ def _run(path: str, engine: str, monkeypatch: pytest.MonkeyPatch) -> StaticResul
 def test_golden(path: str, engine: str, monkeypatch: pytest.MonkeyPatch) -> None:
     result = _run(path, engine, monkeypatch)
     expected_severity, expected_ids = GOLDEN[path]
+    if engine == "regex":
+        expected_severity, expected_ids = REGEX_GOLDEN.get(
+            path, (expected_severity, expected_ids)
+        )
 
     severities = [f.severity for f in result.findings]
     assert max(severities, default=Severity.SAFE) == expected_severity
     unsafe_ids = {f.rule_id for f in result.findings if f.severity == Severity.UNSAFE}
     assert unsafe_ids == expected_ids
+
+
+@pytest.mark.parametrize("path", sorted(CAPABILITIES))
+def test_golden_capabilities(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run(path, "shfmt", monkeypatch)
+    found = {f.rule_id for f in result.findings if f.category == "capability"}
+    assert found == CAPABILITIES[path]
+
+
+def test_docker_group_fires_on_docker_not_on_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _run("fixtures/docker_group.sh", "shfmt", monkeypatch)
+    groups = [f for f in result.findings if f.rule_id == "root-equivalent-group"]
+    assert [(f.line, f.subject, f.group) for f in groups] == [(6, "docker", "trust")]
+
+
+@pytest.mark.parametrize(
+    ("path", "scope"),
+    [("fixtures/apt_global_key.sh", "global"), ("fixtures/apt_signed_by.sh", "scoped")],
+)
+def test_apt_repo_names_its_key_scope(
+    path: str, scope: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _run(path, "shfmt", monkeypatch)
+    repos = [f for f in result.findings if f.rule_id == "package-repo-added"]
+    assert repos
+    assert all(
+        f.description == rules.message("package-repo-added", scope) for f in repos
+    )
 
 
 def test_unparseable_reports_parse_warning_and_regex_finding(

@@ -241,6 +241,10 @@ def _raise(target: Finding, raw: LLMFinding) -> Finding:
         rule_id=target.rule_id,
         file=target.file,
         line=target.line,
+        # A raised capability keeps its group: the footprint still counts it.
+        group=target.group,
+        label=target.label,
+        subject=target.subject,
     )
 
 

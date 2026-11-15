@@ -12,6 +12,7 @@ The finding lands on each chmod that makes an unverified download executable.
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Iterator
 
 from chkscript.static.commands import (
@@ -104,5 +105,7 @@ def unverified_download(model: CommandModel) -> Iterator[Hit]:
             if any(
                 names & g and not ok for g, ok in zip(groups, verified, strict=True)
             ):
-                yield Hit("unverified-download", command.line)
+                value = file.literal or file.text
+                subject = posixpath.basename(value.rstrip("/")) or value
+                yield Hit("unverified-download", command.line, subject=subject)
                 break

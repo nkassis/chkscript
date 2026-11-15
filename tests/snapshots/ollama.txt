@@ -1,0 +1,17 @@
+== Summary ==
+Static analysis only.
+
+!! UNSAFE [shfmt rm-rf-unguarded]: rm -rf on a variable followed by a path, or unquoted, deletes the wrong tree, or /, when the variable is empty or attacker-set. (line 19)
+   cleanup() { rm -rf $TEMP_DIR; }
+
+!! UNSAFE [shfmt rm-rf-unguarded]: rm -rf on a variable followed by a path, or unquoted, deletes the wrong tree, or /, when the variable is empty or attacker-set. (line 166)
+       $SUDO rm -rf "$OLLAMA_INSTALL_DIR/lib/ollama"
+
+NEEDS   root · persistent changes · downloads from 3 hosts (1 unresolved)
+
+== What this script will do to your machine ==
+  root          Runs commands as root (38 places, first at line 81)
+  persistence   Installs a systemd service: ollama.service (line 215)
+  system-write  Writes to system paths: /usr/local/bin/ollama, /usr/bin/ollama, /etc/modules-load.d/nvidia.conf (4 places, first at line 82)
+  trust         Adds a package repository or key trusted globally: developer.download.nvidia.com, contrib.list, contrib.sources (4 places, first at line 325)
+
