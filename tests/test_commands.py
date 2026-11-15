@@ -69,6 +69,11 @@ def test_here_string_fed_to_a_shell_is_code(body: str) -> None:
     assert setenforce.line == 2
 
 
+def test_here_string_piped_from_cat_to_bash_is_code() -> None:
+    [setenforce] = _run(_model("cat <<< 'setenforce 0' | bash"), "setenforce")
+    assert setenforce.line == 2
+
+
 def test_here_string_to_another_command_is_data() -> None:
     assert _names(_model("grep x <<< 'setenforce 0'")) == {"grep"}
 
