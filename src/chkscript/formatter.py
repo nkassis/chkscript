@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sys
 
-from chkscript.models import AnalysisResult, Finding, Severity
+from chkscript.models import ENTRY_FILE, AnalysisResult, Finding, Severity
 
 # ANSI color codes
 _RED = "\033[31m"
@@ -47,6 +47,13 @@ def format_terminal(result: AnalysisResult, verbose: bool = False) -> str:
 
 
 def _location(finding: Finding) -> str:
+    if finding.file != ENTRY_FILE:
+        where = (
+            finding.file if finding.line is None else f"{finding.file}:{finding.line}"
+        )
+        if finding.generated and finding.parent_line is not None:
+            where += f", written by line {finding.parent_line}"
+        return f" ({where})"
     if finding.line is not None:
         return f" (line {finding.line})"
     if finding.line_reference:
@@ -93,6 +100,8 @@ def format_json(result: AnalysisResult) -> str:
                 "line_reference": finding.line_reference,
                 "snippet": finding.snippet,
                 "merged_from": finding.merged_from,
+                "generated": finding.generated,
+                "parent_line": finding.parent_line,
             }
             for finding in result.findings
         ],

@@ -1,10 +1,10 @@
-"""No Semgrep rule may match across a line break.
+"""No rule may stitch two harmless lines into one finding.
 
-Semgrep applies `pattern-regex` to the whole file, so a whitespace class that
-matches a newline lets a rule stitch two harmless lines into one finding. Each
-case below is two lines that are each harmless on their own; none may fire.
-The regex fallback reads one line at a time, so only Semgrep is checked here;
-tests/test_rules.py checks that the two engines agree.
+Each case below is two lines that are each harmless on their own; none may
+fire under either engine. This guarded the old Semgrep rules, whose
+whole-file regexes could match across a newline (NIM-98); it stays as a check
+on both current engines, and test_rules.py runs these cases through the
+fallback-superset check too.
 """
 
 from __future__ import annotations
@@ -12,18 +12,16 @@ from __future__ import annotations
 import pytest
 
 from chkscript.preprocess import preprocess
-from chkscript.static import regex_rules, semgrep
+from chkscript.static import engine, regex_rules, rules
 from tests.conftest import require_tool
 
 # (rule id the case targets, two-line script body)
 CASES: list[tuple[str, str]] = [
-    # The cross-line matches found by the NIM-95 corpus (NIM-98).
     ("insecure-permissions", "chown root:root ${TMP_BIN}\ncp foo /tmp/bar"),
     ("write-system-auth-file", "cp a.conf b.conf \n/etc/passwd-check.sh"),
     ("persistence-append", "tee -a \n~/.bashrc.bak"),
     ("rm-rf-variable", "rm -rf\necho $HOME"),
     ("disable-security", "systemctl disable --now\nufw status"),
-    # One case for every other pattern-regex rule, so new rules get the check.
     ("curl-pipe-shell", "curl -fsSL -o f https://x.example/i.sh\ncat f | sh"),
     ("eval-dynamic", 'eval "echo hi"\necho "$X"'),
     ("decode-to-shell", "base64 --help\necho -d | sh"),
@@ -32,14 +30,18 @@ CASES: list[tuple[str, str]] = [
 ]
 
 
+@pytest.mark.parametrize("engine_name", ["shfmt", "regex"])
 @pytest.mark.parametrize(("rule_id", "body"), CASES, ids=[r for r, _ in CASES])
-def test_no_finding_spans_two_lines(rule_id: str, body: str) -> None:
-    require_tool("semgrep")
-    outcome = semgrep.run(preprocess(f"#!/bin/bash\n{body}\n".encode()))
-    unsafe = [f.rule_id for f in outcome.findings if f.source == "semgrep"]
+def test_no_finding_spans_two_lines(engine_name: str, rule_id: str, body: str) -> None:
+    bundle = preprocess(f"#!/bin/bash\n{body}\n".encode())
+    if engine_name == "shfmt":
+        require_tool("shfmt")
+        findings = engine.scan(bundle).findings
+    else:
+        findings = regex_rules.run(bundle)
+    unsafe = [f.rule_id for f in findings if f.rule_id in rules.RULE_IDS]
     assert unsafe == [], f"{rule_id} case matched across a line break"
 
 
 def test_every_rule_has_a_span_case() -> None:
-    # RULE_IDS equals the YAML's rule ids (test_rules.py checks that).
-    assert {rule for rule, _ in CASES} == regex_rules.RULE_IDS
+    assert {rule for rule, _ in CASES} == rules.RULE_IDS

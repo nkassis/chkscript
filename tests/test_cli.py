@@ -330,9 +330,9 @@ class TestStaticOnly:
             main()
         data = json.loads(capsys.readouterr().out)
         assert data["mode"] == "static-only"
-        assert {"semgrep", "regex"} & set(data["static_tools"])
+        assert {"shfmt", "regex"} & set(data["static_tools"])
         pipe = [f for f in data["findings"] if f["rule_id"] == "curl-pipe-shell"]
-        assert pipe[0]["source"] in ("semgrep", "regex")
+        assert pipe[0]["source"] in ("shfmt", "regex")
         assert pipe[0]["line"] == 4
         assert data["max_severity"] == "unsafe"
 
@@ -386,7 +386,7 @@ class TestDefaultMode:
         assert data["mode"] == "full"
         sources = {f["source"] for f in data["findings"]}
         assert "llm" in sources
-        assert sources & {"semgrep", "regex"}
+        assert sources & {"shfmt", "regex"}
 
     def test_scripted_downgrade_attempt_cannot_lower_floor(
         self,

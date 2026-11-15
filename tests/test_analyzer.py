@@ -64,7 +64,7 @@ def _static() -> list[Finding]:
             severity=Severity.UNSAFE,
             category="unsafe",
             description="Pipes a download into a shell",
-            source="semgrep",
+            source="shfmt",
             rule_id="curl-pipe-shell",
             line=4,
         ),
@@ -72,7 +72,7 @@ def _static() -> list[Finding]:
             severity=Severity.WARNING,
             category="capability",
             description="Downloads a binary verified by TLS only",
-            source="semgrep",
+            source="shfmt",
             rule_id="unverified-download",
             line=5,
         ),
@@ -409,7 +409,7 @@ class TestFloor:
         raised = merged["unverified-download"]
         assert raised.severity == Severity.UNSAFE
         assert raised.category == "unsafe"
-        assert raised.merged_from == ["semgrep", "llm"]
+        assert raised.merged_from == ["shfmt", "llm"]
         assert raised.description == "Host does not belong to the project"
         assert len(merged) == 3
 

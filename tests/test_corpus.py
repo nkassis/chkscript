@@ -1,8 +1,8 @@
 """Real-installer corpus: today's static verdicts, pinned in tests/corpus/expected.toml.
 
-Each installer runs through the static layer under Semgrep and under the regex
-fallback alone (shellcheck runs in both), and any difference from the agreed
-verdict fails. No network: every script is a pinned copy.
+Each installer runs through the static layer under the shfmt engine and under
+the regex fallback alone (shellcheck runs in both), and any difference from the
+agreed verdict fails. No network: every script is a pinned copy.
 """
 
 from __future__ import annotations
@@ -14,28 +14,33 @@ from typing import Any
 
 import pytest
 
-from chkscript.models import Severity
+from chkscript.models import ENTRY_FILE, Severity
 from chkscript.preprocess import preprocess
-from chkscript.static import StaticResult, run_static, semgrep
+from chkscript.static import StaticResult, run_static, shfmt
 from tests.conftest import require_tool
 
 CORPUS = Path(__file__).parent / "corpus"
 EXPECTED: dict[str, Any] = tomllib.loads((CORPUS / "expected.toml").read_text())
-ENGINES = ("semgrep", "regex")
+ENGINES = ("shfmt", "regex")
 VERDICTS = {"true-positive", "noise"}
 
 
 def _run(name: str, engine: str, monkeypatch: pytest.MonkeyPatch) -> StaticResult:
     require_tool("shellcheck")
-    if engine == "semgrep":
-        require_tool("semgrep")
+    if engine == "shfmt":
+        require_tool("shfmt")
     else:
-        monkeypatch.setattr(semgrep, "available", lambda: False)
+        monkeypatch.setattr(shfmt, "check", lambda: "shfmt disabled for this test.")
     return run_static(preprocess((CORPUS / name / "install.sh").read_bytes()))
 
 
 def _expected_findings(name: str, engine: str) -> list[dict[str, Any]]:
     return [f for f in EXPECTED[name]["finding"] if engine in f.get("engines", ENGINES)]
+
+
+def _key(rule: str, file: str) -> tuple[str, str]:
+    # shellcheck codes are pinned by id alone, wherever they fire.
+    return (rule, "" if rule.startswith("SC") else file)
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -45,32 +50,33 @@ def test_corpus_verdict(
 ) -> None:
     result = _run(name, engine, monkeypatch)
     expected = _expected_findings(name, engine)
+    table = EXPECTED[name]
 
     actual_max = max((f.severity for f in result.findings), default=Severity.SAFE)
-    assert actual_max.name.lower() == EXPECTED[name]["max_severity"]
+    wanted_max = table.get(f"{engine}_max_severity", table["max_severity"])
+    assert actual_max.name.lower() == wanted_max
 
-    assert {f.rule_id for f in result.findings} == {e["rule"] for e in expected}
+    actual = {_key(f.rule_id or "", f.file) for f in result.findings}
+    wanted = {_key(e["rule"], e.get("file", ENTRY_FILE)) for e in expected}
+    assert actual == wanted
 
-    pinned: dict[str, list[int]] = {}
+    pinned: dict[tuple[str, str], list[int]] = {}
     for entry in expected:
         if "lines" in entry:
-            pinned.setdefault(entry["rule"], []).extend(entry["lines"])
-    for rule, lines in pinned.items():
-        actual = sorted(f.line for f in result.findings if f.rule_id == rule)
-        assert actual == sorted(lines), rule
+            key = (entry["rule"], entry.get("file", ENTRY_FILE))
+            pinned.setdefault(key, []).extend(entry["lines"])
+    for (rule, file), lines in pinned.items():
+        found = sorted(
+            f.line or 0 for f in result.findings if f.rule_id == rule and f.file == file
+        )
+        assert found == sorted(lines), (rule, file)
 
 
-def test_engines_disagree_only_on_semgrep_coverage_notices() -> None:
-    """Every rule fires identically under both engines; only Semgrep's own
-    parse/failure warnings may be engine-specific (NIM-98)."""
-    coverage = {semgrep.PARSE_ERROR_RULE, semgrep.FAILURE_RULE}
-    engine_specific = {
-        (name, entry["rule"])
-        for name, table in EXPECTED.items()
-        for entry in table["finding"]
-        if set(entry.get("engines", ENGINES)) != set(ENGINES)
-    }
-    assert {rule for _, rule in engine_specific} <= coverage, engine_specific
+@pytest.mark.parametrize("name", sorted(EXPECTED))
+def test_every_installer_parses(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _run(name, "shfmt", monkeypatch)
+    assert "regex" not in result.tools
+    assert not any(f.rule_id == shfmt.PARSE_FAILURE_RULE for f in result.findings)
 
 
 def test_every_installer_has_an_expected_entry() -> None:
@@ -81,7 +87,10 @@ def test_every_installer_has_an_expected_entry() -> None:
 @pytest.mark.parametrize("name", sorted(EXPECTED))
 def test_expected_entries_are_well_formed(name: str) -> None:
     table = EXPECTED[name]
-    assert table["max_severity"] in {"safe", "warning", "unsafe"}
+    severities = {"safe", "warning", "unsafe"}
+    assert table["max_severity"] in severities
+    for engine in ENGINES:
+        assert table.get(f"{engine}_max_severity", "safe") in severities
     for entry in table["finding"]:
         assert entry["verdict"] in VERDICTS, entry
         assert entry["note"].strip(), entry

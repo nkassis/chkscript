@@ -499,7 +499,7 @@ The install footprint is pydantic-ai-slim and pydantic-settings plus optional pr
 | `pydantic-ai-slim[openai]` | Optional extra | Ollama and every OpenAI-compatible endpoint |  |
 | `httpx` | Transitive | Used directly for the fetch tool so there is one HTTP client | `requests`, `urllib` |
 | `shellcheck` | External, on PATH | Lint findings | Vendoring the binary |
-| `shfmt` v3.5.0 or later | External, on PATH | Syntax tree (`--to-json`) for the capability and unsafe rules | `shfmt-py`: one maintainer's repackaging of the binary, a supply-chain trust a security tool should not take on. Semgrep: parses 5 of the 11 corpus installers, and its rules fire on heredoc text that never runs |
+| `shfmt` v3.14.0 or later | External, on PATH | Syntax tree (`--to-json`) for the capability and unsafe rules | `shfmt-py`: one maintainer's repackaging of the binary, a supply-chain trust a security tool should not take on. Semgrep: parses 5 of the 11 corpus installers, and its rules fire on heredoc text that never runs |
 | LangChain / LangGraph | Not used |  | Control flow is a bounded tool loop, not a graph |
 | LiteLLM-style all-in-one gateways | Not used |  | 168 MB tree, March 2026 trojanized-release incident |
 
@@ -507,7 +507,7 @@ The install footprint is pydantic-ai-slim and pydantic-settings plus optional pr
 
 - `uv tool install chkscript[anthropic]` or `[openai]` or `[all]` once published to PyPI; `uv tool install git+https://github.com/nkassis/chkscript` until then.
 - `pipx install` works the same way.
-- The README states plainly that shellcheck and shfmt are recommended and how to install each on Debian, Arch and macOS, and from the upstream shfmt release binary (checksum verified) where the distribution package is older than v3.5.0.
+- The README states plainly that shellcheck and shfmt are recommended and how to install each on Debian, Arch and macOS, and from the upstream shfmt release binary (checksum verified) where the distribution package is older than v3.14.0 (the first release whose `--to-json` writes operators as strings).
 
 **Python version**
 
@@ -524,7 +524,8 @@ src/chkscript/
     shellcheck.py
     shfmt.py         runs shfmt --to-json, version check, parse failures
     commands.py      syntax tree to command model: wrappers, constants, embedded code, generated files, downloads
-    rules.py         rules as Python functions over the command model
+    rules/           rules as Python functions over the command model; ids and messages in catalog.py
+    engine.py        shfmt tree, command model, rules, findings
     regex_rules.py   fallback when shfmt is missing or a file will not parse
     merge.py
   fetch.py         fetch_script tool, allowlist, guardrails, fetch tree
@@ -533,7 +534,7 @@ src/chkscript/
   formatter.py     terminal and JSON
 ```
 
-Module names under `static/` are indicative; phase 2b settles them. Semgrep's `semgrep.py` and `rules/*.yml` are removed.
+Phase 2b (NIM-122) settled these module names. Semgrep's `semgrep.py` and `rules/*.yml` are removed.
 
 ## Conventions from claude-code-patterns
 

@@ -17,19 +17,28 @@ jobs:
       - name: Install Python and dependencies
         run: uv sync --locked
       - name: Install static analyzers
+        env:
+          # Pinned release binary; the digest is GitHub's for this asset, checked
+          # against an independently downloaded copy. Bump both together.
+          SHFMT_VERSION: v3.14.1
+          SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          uv tool install semgrep==1.182.1
-          uv tool dir --bin >> "$GITHUB_PATH"
           shellcheck --version
-          "$(uv tool dir --bin)/semgrep" --version
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/shfmt" \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  $RUNNER_TEMP/shfmt" | sha256sum --check --strict
+          install -m 0755 "$RUNNER_TEMP/shfmt" "$HOME/.local/bin/shfmt"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/shfmt" --version
       - name: Lint
         run: uv run ruff check .
       - name: Format
         run: uv run black --check .
       - name: Test
         env:
-          # A missing shellcheck/semgrep fails tool-gated tests instead of skipping.
+          # A missing shellcheck/shfmt fails tool-gated tests instead of skipping.
           CHKSCRIPT_REQUIRE_TOOLS: "1"
         run: uv run pytest

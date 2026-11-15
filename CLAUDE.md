@@ -1,6 +1,6 @@
 # chkscript
 
-chkscript is a CLI that tells people whether a shell script (usually an installer about to be piped into `sh`) is safe to run, and why. It layers deterministic scanners (shellcheck, Semgrep, a regex fallback) under an LLM that adds intent analysis. The one thing it must get right: no text inside a scanned script can lower the severity of a deterministic finding. The v0.2 design is `docs/spec.md` (branch `docs/v0.2-spec` until merged).
+chkscript is a CLI that tells people whether a shell script (usually an installer about to be piped into `sh`) is safe to run, and why. It layers deterministic scanners (shellcheck, Python rules over shfmt's syntax tree, a regex fallback) under an LLM that adds intent analysis. The one thing it must get right: no text inside a scanned script can lower the severity of a deterministic finding. The v0.2 design is `docs/spec.md` (branch `docs/v0.2-spec` until merged).
 
 `AGENTS.md` has the tooling (setup, external tools, commands, corpus workflow) and is imported below. When a question is not answered here, stop and ask; do not decide silently.
 
@@ -30,7 +30,7 @@ If a hook blocks you, fix the reported problem. Do not add `# noqa` or per-file 
 
 ## Rules
 
-- **Layout** (`src/chkscript/`): `cli.py` argparse and orchestration; `config.py` flag/env resolution, `_FILE` secrets, the default model; `models.py` Pydantic models; `analyzer.py` the LLM call; `formatter.py` terminal and JSON. Planned by later phases, not yet present: `preprocess.py`, `static/` (shellcheck, semgrep, regex_rules, merge), `fetch.py`, and `rules/` for Semgrep YAML. Do not add empty stubs.
+- **Layout** (`src/chkscript/`): `cli.py` argparse and orchestration; `config.py` flag/env resolution, `_FILE` secrets, the default model; `models.py` Pydantic models; `analyzer.py` the LLM call; `formatter.py` terminal and JSON. `preprocess.py` numbering, URL extraction, secrets; `static/` the static layer (`shellcheck.py`, `shfmt.py` the parser, `commands.py` the command model, `rules/` the unsafe-tier rules over it, `engine.py` tying them together, `regex_rules.py` the fallback, `merge.py`). Planned by later phases, not yet present: `fetch.py`. Do not add empty stubs.
 - **Run modes:** full (default: static + LLM + nested fetch), `--no-follow` (static + LLM, no fetch tool), `--static-only` (no model). Today the default mode is static + `LLMAnalyzer` with no fetch tool; the fetch tool and `--no-follow` are phase 4.
 - **Threat model, non-negotiable:** (1) no text inside a scanned script can lower the severity of a deterministic finding; (2) the scanner never executes anything it analyzes, and never fetches anything not literally referenced by a script already in hand.
 - **The model never lowers the floor.** The LLM layer may add findings or raise severity; it never removes or downgrades a static finding.

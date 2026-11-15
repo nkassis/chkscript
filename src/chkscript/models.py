@@ -12,8 +12,8 @@ class Severity(IntEnum):
     UNSAFE = 2
 
 
-Source = Literal["shellcheck", "semgrep", "regex", "llm", "chkscript"]
-StaticTool = Literal["shellcheck", "semgrep", "regex"]
+Source = Literal["shellcheck", "shfmt", "regex", "llm", "chkscript"]
+StaticTool = Literal["shellcheck", "shfmt", "regex"]
 Mode = Literal["full", "no-follow", "static-only"]
 # lint: shellcheck output; capability: powerful but normal for an installer;
 # unsafe: never legitimate in an installer (the floor). See docs/spec.md.
@@ -55,8 +55,9 @@ class ScriptBundle(BaseModel):
 
     file: str = ENTRY_FILE
     text: str
-    # What the Semgrep and regex rules scan: `text` with backslash-newline
-    # continuations joined, line numbers preserved (preprocess.join_continuations).
+    # What the regex fallback scans: `text` with backslash-newline continuations
+    # joined, line numbers preserved (preprocess.join_continuations). shfmt and
+    # shellcheck read `text`.
     rules_text: str
     numbered: str
     # `numbered` with every detected secret replaced by its placeholder: the only
@@ -88,6 +89,11 @@ class Finding(BaseModel):
     file: str = ENTRY_FILE
     line: int | None = None
     merged_from: list[Source] = Field(default_factory=list)
+    # Set on findings in a file the script writes from a heredoc and later runs,
+    # installs or makes executable; `file` is that file's path as written, and
+    # `parent_line` the line in the parent that writes it.
+    generated: bool = False
+    parent_line: int | None = None
 
     @model_validator(mode="before")
     @classmethod
