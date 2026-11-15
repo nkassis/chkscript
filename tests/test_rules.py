@@ -153,6 +153,17 @@ CASES: list[tuple[str, str, bool]] = [
         True,
     ),
     ("rm-rf-variable", "export DIR=/opt/x\nenv -i bash -c 'rm -rf \"$DIR/\"'", True),
+    # env -i discards names set before it, on the command or by an earlier env.
+    (
+        "rm-rf-variable",
+        "DIR=/opt/x env -i bash -c 'rm -rf --no-preserve-root \"$DIR/\"'",
+        True,
+    ),
+    (
+        "rm-rf-variable",
+        "env DIR=/opt/x env -i bash -c 'rm -rf --no-preserve-root \"$DIR/\"'",
+        True,
+    ),
     ("rm-rf-variable", "export DIR=/opt/x\nsudo bash -c 'rm -rf \"$DIR/\"'", True),
     (
         "rm-rf-variable",

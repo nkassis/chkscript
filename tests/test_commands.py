@@ -177,6 +177,31 @@ def test_child_shell_sees_a_passed_variable(body: str) -> None:
     assert _child_rm(body).values == frozenset({"/opt/x"})
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "D=/opt/x env -i bash -c 'rm -rf \"$D\"'",
+        "env D=/opt/x env -i bash -c 'rm -rf \"$D\"'",
+        "D=/opt/x sudo bash -c 'rm -rf \"$D\"'",
+    ],
+    ids=["prefix-then-env-i", "env-then-env-i", "prefix-then-sudo"],
+)
+def test_a_reset_discards_names_set_before_it(body: str) -> None:
+    assert _child_rm(body).values is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "env -i D=/opt/x bash -c 'rm -rf \"$D\"'",
+        "sudo D=/opt/x bash -c 'rm -rf \"$D\"'",
+    ],
+    ids=["env-i-then-set", "sudo-then-set"],
+)
+def test_a_name_set_after_a_reset_is_passed(body: str) -> None:
+    assert _child_rm(body).values == frozenset({"/opt/x"})
+
+
 def test_command_assignment_overrides_the_outer_value() -> None:
     assert _child_rm("export D=/opt/x\nenv D= bash -c 'rm -rf \"$D\"'").values == (
         frozenset({""})

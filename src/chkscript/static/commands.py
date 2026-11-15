@@ -1593,23 +1593,32 @@ def _passed_env(
     """(names set or dropped, environment cleared) for a command, from its
     `NAME=...` prefix and the wrapper words stripped before it.
 
-    Reads cautiously: any `-i`-style flag, `-`, or `sudo`/`doas` (which reset
-    the environment) counts as clearing it, and `-u` drops the next word as a
-    name; at worst a child shell's value becomes unknown.
+    Words apply in order, as the wrappers run: a reset discards every name
+    set before it and keeps those set after (`X=1 env -i bash` passes no X,
+    `env -i X=1 bash` passes X=1). Reads cautiously: any `-i`-style flag,
+    `-`, an unknown word, or `sudo`/`doas` (which reset the environment)
+    counts as a reset, and `-u` drops the next word as a name; at worst a
+    child shell's value becomes unknown.
     """
     env: dict[str, frozenset[str] | None] = dict(assigned)
     clear = False
+
+    def reset() -> None:
+        nonlocal clear
+        clear = True
+        env.clear()
+
     i = 0
     while i < len(wrapper_words):
         arg = wrapper_words[i]
         text = arg.literal
         i += 1
         if text is None:
-            clear = True  # an unknown wrapper word may be `-i`
+            reset()  # an unknown wrapper word may be `-i`
             continue
         word = posixpath.basename(text)
         if word in ("sudo", "doas") or text in ("-", "--ignore-environment"):
-            clear = True
+            reset()
         elif _ASSIGN_WORD.match(text):
             name, _, value = text.partition("=")
             env[name] = frozenset({value})
@@ -1617,7 +1626,8 @@ def _passed_env(
             env[text.partition("=")[2]] = None
         elif text == "--unset" or (text.startswith("-") and not text.startswith("--")):
             letters = "u" if text == "--unset" else text[1:]
-            clear = clear or "i" in letters
+            if "i" in letters:
+                reset()
             if "u" in letters:
                 name = letters[letters.index("u") + 1 :]
                 if not name and i < len(wrapper_words):
